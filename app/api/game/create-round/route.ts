@@ -1009,8 +1009,8 @@ export async function POST(request: Request) {
     } catch (error) {
       console.error('Error fetching from GitHub API for primary repo, trying alternative repos:', error);
       
-      // Try with up to 3 different repositories instead of just one backup
-      const remainingRepos = repoPool.filter(repo => 
+      // Try with up to 5 different repositories instead of just 3
+      const remainingRepos = [...repoPool].filter(repo => 
         `${repo.owner}/${repo.repo}` !== repoKey
       );
       
@@ -1018,8 +1018,8 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: 'Failed to fetch code from any repository' }, { status: 500 });
       }
       
-      // Try up to 3 different repositories
-      const maxBackupRepos = Math.min(3, remainingRepos.length);
+      // Try up to 5 different repositories
+      const maxBackupRepos = Math.min(5, remainingRepos.length);
       let success = false;
       
       for (let i = 0; i < maxBackupRepos && !success; i++) {
@@ -1030,8 +1030,9 @@ export async function POST(request: Request) {
         console.log(`Trying backup repo ${i+1}/${maxBackupRepos}: ${backupRepo.owner}/${backupRepo.repo}`);
         
         try {
-          // Try to get code from the backup repository with slightly reduced requirements
-          const minComplexity = Math.max(3, 4 - i); // Reduce complexity requirement slightly with each attempt
+          // Try to get code from the backup repository with progressively reduced requirements
+          // Reduce complexity requirement more aggressively with each attempt
+          const minComplexity = Math.max(2, 4 - Math.floor(i * 1.5)); 
           const backupResult = await getAppropriateCodeFile(backupRepo.owner, backupRepo.repo, minComplexity);
           
           codeData = {
@@ -1051,6 +1052,37 @@ export async function POST(request: Request) {
           success = true;
         } catch (backupError) {
           console.error(`Error fetching from backup GitHub repo ${i+1}:`, backupError);
+        }
+      }
+      
+      // If still no success, try one last attempt with even more relaxed constraints
+      if (!success && remainingRepos.length > 0) {
+        try {
+          console.log("Making one final attempt with minimal constraints...");
+          // Get a random repo from remaining ones
+          const lastChanceRepoIndex = Math.floor(Math.random() * remainingRepos.length);
+          const lastChanceRepo = remainingRepos[lastChanceRepoIndex];
+          
+          // Try with minimal complexity requirement and reduced line count
+          const lastChanceResult = await getLastChanceCodeFile(lastChanceRepo.owner, lastChanceRepo.repo);
+          
+          codeData = {
+            content: lastChanceResult.content,
+            url: lastChanceResult.url,
+            path: lastChanceResult.path
+          };
+          programDescription = lastChanceResult.description;
+          complexity = lastChanceResult.complexity || 3; // Default to moderate complexity
+          
+          // Add to history
+          const lastChanceRepoKey = `${lastChanceRepo.owner}/${lastChanceRepo.repo}`;
+          if (!gameRepoHistory[gameId].includes(lastChanceRepoKey)) {
+            gameRepoHistory[gameId].push(lastChanceRepoKey);
+          }
+          
+          success = true;
+        } catch (finalError) {
+          console.error("Final attempt failed:", finalError);
         }
       }
       
@@ -1105,8 +1137,8 @@ export async function POST(request: Request) {
 
 // Function to get a random code file with appropriate complexity and minimum line count
 async function getAppropriateCodeFile(owner: string, repo: string, minComplexity: number = 4) {
-  // Try up to 8 times to find an appropriately complex file with enough code lines
-  for (let attempt = 0; attempt < 8; attempt++) {
+  // Try up to 12 times to find an appropriately complex file with enough code lines
+  for (let attempt = 0; attempt < 12; attempt++) {
     try {
       // Get a random code file
       const codeData = await getRandomCodeFile(owner, repo);
@@ -1122,9 +1154,12 @@ async function getAppropriateCodeFile(owner: string, repo: string, minComplexity
       
       console.log(`Selected file ${codeData.path} has ${codeLineCount} lines of code (excluding comments)`);
       
-      // Check if the file has enough lines of code (100+)
-      if (codeLineCount < 100) {
-        console.log(`File ${codeData.path} has fewer than 100 lines of code (${codeLineCount}), trying again...`);
+      // Progressively reduce line count requirement in later attempts
+      const minLines = attempt < 8 ? 100 : (attempt < 10 ? 80 : 60);
+      
+      // Check if the file has enough lines of code
+      if (codeLineCount < minLines) {
+        console.log(`File ${codeData.path} has fewer than ${minLines} lines of code (${codeLineCount}), trying again...`);
         continue;
       }
       
@@ -1138,7 +1173,9 @@ async function getAppropriateCodeFile(owner: string, repo: string, minComplexity
       console.log(`Selected file ${codeData.path} has complexity: ${analysis.complexity}`);
       
       // If complexity is sufficient, return it
-      if (analysis.complexity >= minComplexity) {
+      // Progressively reduce complexity requirement in later attempts
+      const targetComplexity = attempt < 8 ? minComplexity : Math.max(2, minComplexity - 1);
+      if (analysis.complexity >= targetComplexity) {
         return {
           ...codeData,
           content: cleanCode, // Return the code with comments removed
@@ -1150,9 +1187,60 @@ async function getAppropriateCodeFile(owner: string, repo: string, minComplexity
       }
     } catch (error) {
       console.error(`Attempt ${attempt + 1} failed:`, error);
-      if (attempt === 7) throw error; // Re-throw on last attempt
+      if (attempt === 11) throw error; // Re-throw on last attempt
     }
   }
   
   throw new Error('Could not find a file with appropriate complexity and minimum line count');
+}
+
+// Fallback function for finding any valid code when all else fails
+async function getLastChanceCodeFile(owner: string, repo: string) {
+  console.log(`Last chance attempt for ${owner}/${repo} with minimal requirements`);
+  
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      // Get any code file we can find
+      const codeData = await getRandomCodeFile(owner, repo);
+      
+      // Get the language from the file path
+      const language = getLanguageFromPath(codeData.path);
+      
+      // Remove comments from the code
+      const cleanCode = removeComments(codeData.content, language);
+      
+      // Count non-comment lines
+      const codeLineCount = countCodeLines(cleanCode);
+      
+      // Accept any file with at least 50 lines
+      if (codeLineCount >= 50) {
+        console.log(`Last chance found file ${codeData.path} with ${codeLineCount} lines`);
+        
+        // Simple description if we can't get an AI analysis
+        let description = "This code implements functionality relevant to the repository.";
+        let complexity = 3; // Default moderate complexity
+        
+        try {
+          // Try to get analysis but don't fail if it doesn't work
+          const analysis = await analyzeCode(cleanCode, codeData.path, language);
+          description = analysis.description;
+          complexity = analysis.complexity;
+        } catch (analysisError) {
+          console.error("Failed to analyze code, using default description", analysisError);
+        }
+        
+        return {
+          ...codeData,
+          content: cleanCode,
+          description,
+          complexity
+        };
+      }
+    } catch (error) {
+      console.error(`Last chance attempt ${attempt + 1} failed:`, error);
+      if (attempt === 4) throw error;
+    }
+  }
+  
+  throw new Error('Even last chance attempts failed to find suitable code');
 }
