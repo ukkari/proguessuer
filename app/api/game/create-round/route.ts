@@ -684,6 +684,13 @@ const popularRepos = [
   }
 ];
 
+// Define interface for code file
+interface CodeFile {
+  content: string;
+  url: string;
+  path: string;
+}
+
 // Function to fetch files from a repository
 async function fetchRepoFiles(owner: string, repo: string, path: string = '') {
   const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
@@ -704,7 +711,7 @@ async function fetchRepoFiles(owner: string, repo: string, path: string = '') {
 }
 
 // Function to fetch a specific file content
-async function fetchFileContent(owner: string, repo: string, path: string) {
+async function fetchFileContent(owner: string, repo: string, path: string): Promise<CodeFile> {
   const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
   const headers: HeadersInit = {
     'Accept': 'application/vnd.github.v3+json',
@@ -741,7 +748,7 @@ function isCodeFile(filename: string) {
 }
 
 // Function to get a random interesting code file from a repository
-async function getRandomCodeFile(owner: string, repo: string) {
+async function getRandomCodeFile(owner: string, repo: string): Promise<CodeFile> {
   try {
     // First, get the list of directories in the repo
     const dirs = await fetchRepoFiles(owner, repo);
