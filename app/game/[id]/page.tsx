@@ -52,14 +52,11 @@ export default function GameRoom({ params }: { params: { id: string } }) {
     }
   }
   
-  // Fetch current round separately - エラーハンドリングを改善
+  // Fetch current round separately - improved error handling
   const fetchCurrentRound = async (gameRoomId: string, roundNumber: number) => {
     try {
-      // ゲームがまだ開始していない場合はラウンドをフェッチしない
-      if (roundNumber <= 0) {
-        console.log('Game has not started yet, no rounds to fetch');
-        return;
-      }
+      // Don't fetch rounds if the game hasn't started yet
+      if (roundNumber <= 0) return null
       
       const { data: round, error } = await supabase
         .from('rounds')
@@ -69,7 +66,7 @@ export default function GameRoom({ params }: { params: { id: string } }) {
         .single()
       
       if (error) {
-        // ラウンドがまだ作成されていない場合は普通のログとして記録
+        // Log as regular message if round hasn't been created yet
         if (error.code === 'PGRST116') {
           console.log(`Round ${roundNumber} not created yet for game ${gameRoomId}`);
         } else {
@@ -83,11 +80,11 @@ export default function GameRoom({ params }: { params: { id: string } }) {
         setCurrentRound(round)
         setTimeLeft(round.time_limit)
         
-        // 必要な場合のみ状態をリセット（今のラウンドと異なる場合、または初期化時）
+        // Only reset state if needed (if different from current round or during initialization)
         if (!currentRound || currentRound.round_number !== round.round_number) {
           console.log("New round detected, checking existing answers")
           
-          // 既存の回答があるかチェック
+          // Check for existing answers
           if (playerNumber === 1 && round.player1_answer) {
             setSubmittedAnswer(true)
             setAnswer(round.player1_answer)
@@ -95,9 +92,9 @@ export default function GameRoom({ params }: { params: { id: string } }) {
             setSubmittedAnswer(true)
             setAnswer(round.player2_answer)
           } else if (round.status === 'active') {
-            // 新しいラウンドの場合のみ提出状態をリセット
+            // For new rounds, only reset submittedAnswer
             setSubmittedAnswer(false)
-            // 入力中の内容は保持するため、setAnswer('')は行わない
+            // Don't clear the answer input to preserve what the user is typing
           }
         }
       }
@@ -247,13 +244,13 @@ export default function GameRoom({ params }: { params: { id: string } }) {
             await fetchPlayers(payload.new)
           }
           
-          // 現在のラウンドが変更された場合
+          // When the current round has changed
           if (payload.old.current_round !== payload.new.current_round) {
             console.log("Round number changed, resetting answer state")
-            // ラウンドが変わったときは確実に回答状態をリセット
+            // Make sure to reset answer state when the round changes
             setSubmittedAnswer(false)
             
-            // 非ホストプレイヤーの場合は入力内容もクリア
+            // Clear input content for non-host players
             if (!isHost) {
               console.log("Non-host player, clearing answer input")
               setAnswer('')
@@ -264,11 +261,11 @@ export default function GameRoom({ params }: { params: { id: string } }) {
             await fetchCurrentRound(payload.new.id, payload.new.current_round)
           }
           
-          // ゲームステータスが変わった場合も状態を更新
+          // Update state when game status changes
           if (payload.old.status !== payload.new.status && payload.new.status === 'playing') {
             console.log("Game status changed to playing, fetching initial round")
             setSubmittedAnswer(false)
-            // setAnswer('') - 入力中の内容は保持 - 不必要なクリアを防ぐ
+            // Don't clear input content - preserve what the user is typing to prevent unnecessary clearing
             await fetchCurrentRound(payload.new.id, payload.new.current_round)
           }
           
@@ -345,7 +342,7 @@ export default function GameRoom({ params }: { params: { id: string } }) {
                 console.log("Resetting answer state for new round")
                 setSubmittedAnswer(false)
                 
-                // 非ホストプレイヤーの場合は入力内容もクリア
+                // Clear input content for non-host players
                 if (!isHost) {
                   console.log("Non-host player, clearing answer on new round")
                   setAnswer('')
@@ -385,7 +382,7 @@ export default function GameRoom({ params }: { params: { id: string } }) {
             // Always reset submitted state for ALL players when a new round is created
             setSubmittedAnswer(false)
             
-            // 非ホストプレイヤーの場合は入力内容もクリア
+            // Clear input content for non-host players
             if (!isHost) {
               console.log("Non-host player, clearing answer on new round creation")
               setAnswer('')
@@ -407,26 +404,26 @@ export default function GameRoom({ params }: { params: { id: string } }) {
     }
   }, [userId, gameId, supabase, playerNumber])
   
-  // 依存関係を修正
+  // Fix dependencies
   useEffect(() => {
-    // ゲームデータとカレントラウンドの両方が存在する場合のみチェック
+    // Only check when both game data and current round exist
     if (gameData?.status === 'playing' && gameData?.current_round && currentRound) {
-      // ラウンド番号が一致しない場合はデータの不整合があるため、強制的に更新
+      // There's a data inconsistency if round numbers don't match, force update
       if (gameData.current_round !== currentRound.round_number) {
         console.log("Round mismatch detected in useEffect:", 
           "game shows round", gameData.current_round, 
           "but current round is", currentRound.round_number);
         
-        // 提出状態のみリセット
+        // Only reset submission status
         setSubmittedAnswer(false);
         
-        // 非ホストプレイヤーの場合は入力内容もクリア
+        // Clear input content for non-host players
         if (!isHost) {
           console.log("Non-host player, clearing answer input on round mismatch")
           setAnswer('')
         }
         
-        // 正しいラウンドを取得 - fetchCurrentRoundへの依存を避ける
+        // Get the correct round - avoid dependency on fetchCurrentRound
         const fetchCorrectRound = async () => {
           try {
             const { data: round, error } = await supabase
@@ -446,7 +443,7 @@ export default function GameRoom({ params }: { params: { id: string } }) {
               setCurrentRound(round)
               setTimeLeft(round.time_limit)
               
-              // 既存の回答があるかチェック
+              // Check for existing answers
               if (playerNumber === 1 && round.player1_answer) {
                 setSubmittedAnswer(true)
                 setAnswer(round.player1_answer)
@@ -454,9 +451,9 @@ export default function GameRoom({ params }: { params: { id: string } }) {
                 setSubmittedAnswer(true)
                 setAnswer(round.player2_answer)
               } else if (round.status === 'active') {
-                // 新しいラウンドの場合はsubmittedAnswerのみリセット
+                // For new rounds, only reset submittedAnswer
                 setSubmittedAnswer(false)
-                // 入力中の内容は保持するため、setAnswer('')は行わない
+                // Don't clear the answer input to preserve what the user is typing
               }
             }
           } catch (err) {
@@ -741,7 +738,7 @@ export default function GameRoom({ params }: { params: { id: string } }) {
     setLoading(true)
     
     try {
-      // 事前に状態をリセット（UI応答性のため）- 次のラウンドなので明示的にリセットは可能
+      // Reset state in advance (for UI responsiveness) - explicit reset is possible for the next round
       setSubmittedAnswer(false)
       setAnswer('')
       
@@ -763,7 +760,7 @@ export default function GameRoom({ params }: { params: { id: string } }) {
       // Create next round
       const nextRoundNumber = gameData.current_round + 1
       
-      // ラウンドを移動したことをログに出力
+      // Log the round transition
       console.log(`Moving from round ${gameData.current_round} to round ${nextRoundNumber}`)
       
       // Update game's current round
@@ -813,7 +810,7 @@ export default function GameRoom({ params }: { params: { id: string } }) {
       // Fetch the new round after a short delay to ensure all subscriptions have received updates
       setTimeout(async () => {
         try {
-          // 状態をリセット（新しいラウンドのため）
+          // Reset state (for the new round)
           setSubmittedAnswer(false)
           setAnswer('')
           

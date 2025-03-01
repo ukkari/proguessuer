@@ -829,7 +829,7 @@ async function analyzeCode(code: string, path: string, language: string) {
       ],
       temperature: 0.7,
       max_tokens: 300,
-      response_format: { type: "json_object" }, // 構造化されたレスポンスを要求
+      response_format: { type: "json_object" }, // Request structured response
     });
 
     let analysis;
