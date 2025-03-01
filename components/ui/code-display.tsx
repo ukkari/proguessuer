@@ -10,9 +10,10 @@ interface CodeDisplayProps {
   height?: string;
   title?: string;
   className?: string;
+  path?: string;
 }
 
-export function CodeDisplay({ code, height = '300px', title = 'Code', className }: CodeDisplayProps) {
+export function CodeDisplay({ code, height = '200px', title = 'Code', className, path }: CodeDisplayProps) {
   const [isExpanded, setIsExpanded] = useState(false);
 
   // Create a dialog for the expanded view

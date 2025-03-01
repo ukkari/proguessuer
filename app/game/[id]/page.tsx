@@ -1196,8 +1196,9 @@ export default function GameRoom({ params }: { params: { id: string } }) {
             <CardContent>
               <CodeDisplay 
                 code={currentRound.program_code} 
-                height="300px"
-                title={`Program (${currentRound.path || 'Code Snippet'})`} 
+                height="200px"
+                title="Program Code"
+                path={currentRound.path} 
               />
             </CardContent>
           </Card>
