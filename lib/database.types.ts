@@ -59,6 +59,7 @@ export interface Database {
           program_url: string
           program_code: string
           program_description: string
+          path: string | null
           time_limit: number
           player1_answer: string | null
           player2_answer: string | null
@@ -74,6 +75,7 @@ export interface Database {
           program_url: string
           program_code: string
           program_description: string
+          path?: string | null
           time_limit: number
           player1_answer?: string | null
           player2_answer?: string | null
@@ -89,6 +91,7 @@ export interface Database {
           program_url?: string
           program_code?: string
           program_description?: string
+          path?: string | null
           time_limit?: number
           player1_answer?: string | null
           player2_answer?: string | null

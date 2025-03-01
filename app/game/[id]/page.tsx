@@ -13,6 +13,7 @@ import { formatTime } from '@/lib/utils'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Progress } from "@/components/ui/progress"
+import { CodeDisplay } from '@/components/ui/code-display'
 
 export default function GameRoom({ params }: { params: { id: string } }) {
   const gameId = params.id
@@ -1193,11 +1194,11 @@ export default function GameRoom({ params }: { params: { id: string } }) {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <ScrollArea className="h-[300px] rounded-md border p-4">
-                <pre className="text-sm font-mono whitespace-pre-wrap">
-                  {currentRound.program_code}
-                </pre>
-              </ScrollArea>
+              <CodeDisplay 
+                code={currentRound.program_code} 
+                height="300px"
+                title={`Program (${currentRound.path || 'Code Snippet'})`} 
+              />
             </CardContent>
           </Card>
           

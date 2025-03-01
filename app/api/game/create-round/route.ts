@@ -895,6 +895,8 @@ function getLanguageFromPath(path: string) {
 
 // Function to remove comments from code based on language
 function removeComments(code: string, language: string): string {
+  let result = '';
+  
   switch (language.toLowerCase()) {
     case 'javascript':
     case 'javascript (react)':
@@ -908,26 +910,34 @@ function removeComments(code: string, language: string): string {
     case 'rust':
     case 'php':
       // Remove multi-line comments (/* */)
-      let result = code.replace(/\/\*[\s\S]*?\*\//g, '');
+      result = code.replace(/\/\*[\s\S]*?\*\//g, '');
       // Remove single-line comments (//)
       result = result.replace(/\/\/.*$/gm, '');
-      return result;
+      break;
     
     case 'python':
     case 'ruby':
       // Remove multi-line docstrings (''' ''' or """ """)
-      let pyResult = code.replace(/(['"])['"][^]*?\1\1/g, '');
+      result = code.replace(/(['"])['"][^]*?\1\1/g, '');
       // Remove single-line comments (#)
-      pyResult = pyResult.replace(/#.*$/gm, '');
-      return pyResult;
+      result = result.replace(/#.*$/gm, '');
+      break;
     
     default:
       // For unknown languages, make a best effort to remove common comment styles
-      let defaultResult = code.replace(/\/\*[\s\S]*?\*\//g, ''); // C-style multi-line
-      defaultResult = defaultResult.replace(/\/\/.*$/gm, '');    // C-style single-line
-      defaultResult = defaultResult.replace(/#.*$/gm, '');       // Shell/Python style
-      return defaultResult;
+      result = code.replace(/\/\*[\s\S]*?\*\//g, ''); // C-style multi-line
+      result = result.replace(/\/\/.*$/gm, '');    // C-style single-line
+      result = result.replace(/#.*$/gm, '');       // Shell/Python style
+      break;
   }
+  
+  // Remove consecutive blank lines (replace 2+ consecutive newlines with just 2)
+  result = result.replace(/\n{3,}/g, '\n\n');
+  
+  // Remove blank lines at the beginning of the file
+  result = result.replace(/^\s*\n+/, '');
+  
+  return result;
 }
 
 // Function to count non-comment, non-empty lines of code
@@ -997,10 +1007,9 @@ export async function POST(request: Request) {
       programDescription = result.description;
       complexity = result.complexity;
     } catch (error) {
-      console.error('Error fetching from GitHub API for primary repo, trying alternative repo:', error);
+      console.error('Error fetching from GitHub API for primary repo, trying alternative repos:', error);
       
-      // Try with a different repository instead of using fallback snippets
-      // Get remaining repos that haven't been tried yet
+      // Try with up to 3 different repositories instead of just one backup
       const remainingRepos = repoPool.filter(repo => 
         `${repo.owner}/${repo.repo}` !== repoKey
       );
@@ -1009,33 +1018,50 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: 'Failed to fetch code from any repository' }, { status: 500 });
       }
       
-      // Select a different random repository
-      const backupRepoIndex = Math.floor(Math.random() * remainingRepos.length);
-      const backupRepo = remainingRepos[backupRepoIndex];
+      // Try up to 3 different repositories
+      const maxBackupRepos = Math.min(3, remainingRepos.length);
+      let success = false;
       
-      console.log(`Trying backup repo: ${backupRepo.owner}/${backupRepo.repo}`);
-      
-      try {
-        // Try to get code from the backup repository
-        const backupResult = await getAppropriateCodeFile(backupRepo.owner, backupRepo.repo, 3);
+      for (let i = 0; i < maxBackupRepos && !success; i++) {
+        // Select a different random repository
+        const backupRepoIndex = Math.floor(Math.random() * remainingRepos.length);
+        const backupRepo = remainingRepos.splice(backupRepoIndex, 1)[0]; // Remove the repo from the pool
         
-        codeData = {
-          content: backupResult.content,
-          url: backupResult.url,
-          path: backupResult.path
-        };
-        programDescription = backupResult.description;
-        complexity = backupResult.complexity;
+        console.log(`Trying backup repo ${i+1}/${maxBackupRepos}: ${backupRepo.owner}/${backupRepo.repo}`);
         
-        // Add backup repo to history if successful
-        const backupRepoKey = `${backupRepo.owner}/${backupRepo.repo}`;
-        if (!gameRepoHistory[gameId].includes(backupRepoKey)) {
-          gameRepoHistory[gameId].push(backupRepoKey);
+        try {
+          // Try to get code from the backup repository with slightly reduced requirements
+          const minComplexity = Math.max(3, 4 - i); // Reduce complexity requirement slightly with each attempt
+          const backupResult = await getAppropriateCodeFile(backupRepo.owner, backupRepo.repo, minComplexity);
+          
+          codeData = {
+            content: backupResult.content,
+            url: backupResult.url,
+            path: backupResult.path
+          };
+          programDescription = backupResult.description;
+          complexity = backupResult.complexity;
+          
+          // Add backup repo to history if successful
+          const backupRepoKey = `${backupRepo.owner}/${backupRepo.repo}`;
+          if (!gameRepoHistory[gameId].includes(backupRepoKey)) {
+            gameRepoHistory[gameId].push(backupRepoKey);
+          }
+          
+          success = true;
+        } catch (backupError) {
+          console.error(`Error fetching from backup GitHub repo ${i+1}:`, backupError);
         }
-      } catch (backupError) {
-        console.error('Error fetching from backup GitHub repo:', backupError);
-        return NextResponse.json({ error: 'Failed to fetch code from any repository' }, { status: 500 });
       }
+      
+      if (!success) {
+        return NextResponse.json({ error: 'Failed to fetch code from any repository after multiple attempts' }, { status: 500 });
+      }
+    }
+    
+    // Ensure codeData exists before proceeding
+    if (!codeData) {
+      return NextResponse.json({ error: 'Failed to fetch valid code data' }, { status: 500 });
     }
     
     // Calculate time limit based on complexity (10-60 seconds)
@@ -1053,6 +1079,7 @@ export async function POST(request: Request) {
         program_url: codeData.url,
         program_code: codeData.content,
         program_description: programDescription,
+        path: codeData.path,
         time_limit: timeLimit,
         status: 'active',
       })
@@ -1078,8 +1105,8 @@ export async function POST(request: Request) {
 
 // Function to get a random code file with appropriate complexity and minimum line count
 async function getAppropriateCodeFile(owner: string, repo: string, minComplexity: number = 4) {
-  // Try up to 5 times to find an appropriately complex file with enough code lines
-  for (let attempt = 0; attempt < 5; attempt++) {
+  // Try up to 8 times to find an appropriately complex file with enough code lines
+  for (let attempt = 0; attempt < 8; attempt++) {
     try {
       // Get a random code file
       const codeData = await getRandomCodeFile(owner, repo);
@@ -1123,7 +1150,7 @@ async function getAppropriateCodeFile(owner: string, repo: string, minComplexity
       }
     } catch (error) {
       console.error(`Attempt ${attempt + 1} failed:`, error);
-      if (attempt === 4) throw error; // Re-throw on last attempt
+      if (attempt === 7) throw error; // Re-throw on last attempt
     }
   }
   
