@@ -31,6 +31,7 @@ export default function GameRoom({ params }: { params: { id: string } }) {
   const [userId, setUserId] = useState('')
   const [playerNumber, setPlayerNumber] = useState<1 | 2 | null>(null)
   const [submittedAnswer, setSubmittedAnswer] = useState(false)
+  const [fetchingNewRound, setFetchingNewRound] = useState(false)
   
   // Fetch players separately
   const fetchPlayers = async (gameRoom: any) => {
@@ -531,9 +532,28 @@ export default function GameRoom({ params }: { params: { id: string } }) {
       
       if (!response.ok) {
         const errorText = await response.text()
+        let errorMessage;
         try {
           const errorData = JSON.parse(errorText)
-          throw new Error(`Failed to create round: ${errorData.error || response.statusText}`)
+          errorMessage = errorData.error || response.statusText;
+          
+          // Check for specific error about failing to fetch code from repositories
+          if (errorMessage === 'Failed to fetch code from any repository after multiple attempts' && isHost) {
+            setLoading(false);
+            toast({
+              title: "Failed to fetch code",
+              description: "Unable to fetch code from any repository. Would you like to try again?",
+              variant: "destructive",
+              action: (
+                <Button variant="outline" onClick={() => retryCreateRound(1)}>
+                  Retry
+                </Button>
+              ),
+            });
+            return;
+          }
+          
+          throw new Error(`Failed to create round: ${errorMessage}`)
         } catch (e) {
           throw new Error(`Failed to create round: ${errorText || response.statusText}`)
         }
@@ -627,6 +647,11 @@ export default function GameRoom({ params }: { params: { id: string } }) {
         title: "Failed to start game",
         description: error instanceof Error ? error.message : "Please try again.",
         variant: "destructive",
+        action: isHost ? (
+          <Button variant="outline" onClick={() => retryCreateRound(1)}>
+            Retry
+          </Button>
+        ) : undefined
       })
       setLoading(false)
     }
@@ -737,6 +762,7 @@ export default function GameRoom({ params }: { params: { id: string } }) {
     if (!isHost || !gameData) return
     
     setLoading(true)
+    setFetchingNewRound(true)
     
     try {
       // Reset state in advance (for UI responsiveness) - explicit reset is possible for the next round
@@ -755,6 +781,7 @@ export default function GameRoom({ params }: { params: { id: string } }) {
           title: "Game completed!",
           description: "Thanks for playing!",
         })
+        setFetchingNewRound(false)
         return
       }
       
@@ -785,7 +812,30 @@ export default function GameRoom({ params }: { params: { id: string } }) {
       
       if (!response.ok) {
         const errorText = await response.text()
-        throw new Error(`Failed to create next round: ${errorText}`)
+        try {
+          const errorData = JSON.parse(errorText);
+          const errorMessage = errorData.error || response.statusText;
+          
+          // Check for specific error about failing to fetch code from repositories
+          if (errorMessage === 'Failed to fetch code from any repository after multiple attempts' && isHost) {
+            setLoading(false);
+            toast({
+              title: "Failed to fetch code",
+              description: "Unable to fetch code from any repository. Would you like to try again?",
+              variant: "destructive",
+              action: (
+                <Button variant="outline" onClick={() => retryCreateRound(nextRoundNumber)}>
+                  Retry
+                </Button>
+              ),
+            });
+            return;
+          }
+          
+          throw new Error(`Failed to create next round: ${errorMessage}`);
+        } catch (e) {
+          throw new Error(`Failed to create next round: ${errorText}`)
+        }
       }
       
       // Get the response data
@@ -895,14 +945,115 @@ export default function GameRoom({ params }: { params: { id: string } }) {
       }, 700) // さらに待機時間を延長
     } catch (error) {
       console.error('Error starting next round:', error)
+      const nextRoundNumber = gameData.current_round + 1;
       toast({
         title: "Failed to start next round",
         description: "Please try again.",
         variant: "destructive",
+        action: isHost ? (
+          <Button variant="outline" onClick={() => retryCreateRound(nextRoundNumber)}>
+            Retry
+          </Button>
+        ) : undefined
       })
       setLoading(false)
+      setFetchingNewRound(false)
     }
   }
+  
+  // Add new function to retry creating a round
+  const retryCreateRound = async (roundNumber: number) => {
+    setLoading(true);
+    setFetchingNewRound(true);
+    
+    try {
+      console.log(`Retrying to create round ${roundNumber}`);
+      
+      // Create the round again
+      const response = await fetch('/api/game/create-round', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ gameId, roundNumber }),
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        try {
+          const errorData = JSON.parse(errorText);
+          const errorMessage = errorData.error || response.statusText;
+          
+          // Check if we get the same error again
+          if (errorMessage === 'Failed to fetch code from any repository after multiple attempts') {
+            setLoading(false);
+            toast({
+              title: "Still unable to fetch code",
+              description: "Failed to fetch code after retrying. Would you like to try again?",
+              variant: "destructive",
+              action: (
+                <Button variant="outline" onClick={() => retryCreateRound(roundNumber)}>
+                  Retry Again
+                </Button>
+              ),
+            });
+            return;
+          }
+          
+          throw new Error(`Failed to create round: ${errorMessage}`);
+        } catch (e) {
+          throw new Error(`Failed to create round: ${errorText || response.statusText}`);
+        }
+      }
+      
+      const roundResult = await response.json();
+      console.log("Round created after retry:", roundResult);
+      
+      // Update game data to reflect the new round
+      const { data: updatedGameRoom } = await supabase
+        .from('game_rooms')
+        .select('*')
+        .eq('id', gameId)
+        .single();
+        
+      if (updatedGameRoom) {
+        setGameData(updatedGameRoom);
+      }
+      
+      // Fetch the newly created round
+      const { data: newRound } = await supabase
+        .from('rounds')
+        .select('*')
+        .eq('game_room_id', gameId)
+        .eq('round_number', roundNumber)
+        .single();
+        
+      if (newRound) {
+        console.log("New round fetched after retry:", newRound);
+        setCurrentRound(newRound);
+        setTimeLeft(newRound.time_limit);
+        setSubmittedAnswer(false);
+        setAnswer('');
+        
+        toast({
+          title: "Success!",
+          description: `Round ${roundNumber} has been created successfully.`,
+        });
+      }
+      
+      setLoading(false);
+      setFetchingNewRound(false);
+    } catch (error) {
+      console.error('Error retrying round creation:', error);
+      toast({
+        title: "Failed to create round",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+      setLoading(false);
+      setFetchingNewRound(false);
+    }
+  };
   
   if (loading && !gameData) {
     return (
@@ -1127,6 +1278,19 @@ export default function GameRoom({ params }: { params: { id: string } }) {
     
     return (
       <div className="flex min-h-screen flex-col p-4 max-w-6xl mx-auto">
+        {fetchingNewRound && (
+          <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center flex-col">
+            <div className="bg-card p-6 rounded-lg shadow-lg text-center max-w-md mx-auto space-y-4">
+              <Loader2 className="h-12 w-12 animate-spin mx-auto text-primary" />
+              <h3 className="text-xl font-semibold">Fetching New Code Challenge</h3>
+              <p className="text-muted-foreground">Searching GitHub repositories for an interesting code snippet...</p>
+              <div className="h-2 w-full bg-muted overflow-hidden rounded-full">
+                <div className="h-full bg-primary rounded-full animate-pulse" style={{ width: '60%' }}></div>
+              </div>
+            </div>
+          </div>
+        )}
+        
         <div className="flex justify-between items-center mb-6">
           <div className="flex items-center gap-2">
             <p className="font-medium">Round {gameData.current_round} of {gameData.total_rounds}</p>

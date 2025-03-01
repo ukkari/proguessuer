@@ -43,11 +43,13 @@ export function CodeDisplay({ code, height = '200px', title = 'Code', className,
           </DialogContent>
         </Dialog>
       </div>
-      <ScrollArea className={`${height} rounded-md border p-4`}>
-        <pre className="text-sm font-mono whitespace-pre-wrap">
-          {code}
-        </pre>
-      </ScrollArea>
+      <div style={{ height }} className="overflow-hidden rounded-md border">
+        <ScrollArea className="h-full w-full p-4">
+          <pre className="text-sm font-mono whitespace-pre-wrap">
+            {code}
+          </pre>
+        </ScrollArea>
+      </div>
     </div>
   );
 } 
