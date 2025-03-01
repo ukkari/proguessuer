@@ -126,6 +126,41 @@ export interface Database {
           games_won?: number
         }
       }
+      github_cache: {
+        Row: {
+          id: string
+          created_at: string
+          owner: string
+          repo: string
+          path: string
+          url: string
+          content: string
+          content_type: string
+          last_accessed: string
+        }
+        Insert: {
+          id?: string
+          created_at?: string
+          owner: string
+          repo: string
+          path: string
+          url: string
+          content: string
+          content_type: string
+          last_accessed?: string
+        }
+        Update: {
+          id?: string
+          created_at?: string
+          owner?: string
+          repo?: string
+          path?: string
+          url?: string
+          content?: string
+          content_type?: string
+          last_accessed?: string
+        }
+      }
     }
     Views: {
       [_ in never]: never

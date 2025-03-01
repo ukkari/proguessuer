@@ -219,9 +219,11 @@ export default function GameRoom({ params }: { params: { id: string } }) {
       }
     }, 5000) // Poll every 5 seconds as a fallback
     
+    // Create channel reference to be used for both subscription and broadcasting
+    const gameRoomChannel = supabase.channel(`game_room:${gameId}`)
+    
     // Set up realtime subscription with enhanced handling
-    const gameSubscription = supabase
-      .channel(`game_room:${gameId}`)
+    const gameSubscription = gameRoomChannel
       .on('postgres_changes', {
         event: 'UPDATE',
         schema: 'public',
@@ -286,9 +288,18 @@ export default function GameRoom({ params }: { params: { id: string } }) {
           }, 300)
         }
       })
+      // Add a custom event handler for fetching state - remove the isHost check to ensure all players receive it
+      .on('broadcast', { event: 'fetch_new_round' }, (payload) => {
+        console.log("Received fetch_new_round broadcast event:", payload)
+        setFetchingNewRound(payload.loading)
+      })
       .subscribe((status) => {
         console.log("Game subscription status:", status)
       })
+    
+    // Store the channel reference in a ref to use for broadcasting
+    // @ts-ignore - Add to window for debugging and access in other functions
+    window.gameRoomChannel = gameRoomChannel;
     
     // Improved rounds subscription with better error handling and more frequent polling
     const roundsSubscription = supabase
@@ -405,6 +416,8 @@ export default function GameRoom({ params }: { params: { id: string } }) {
       clearInterval(polling)
       gameSubscription.unsubscribe()
       roundsSubscription.unsubscribe()
+      // @ts-ignore - Clean up window reference
+      delete window.gameRoomChannel;
     }
   }, [userId, gameId, supabase, playerNumber])
   
@@ -766,6 +779,14 @@ export default function GameRoom({ params }: { params: { id: string } }) {
     setLoading(true)
     setFetchingNewRound(true)
     
+    // Broadcast to other players that we're fetching a new round - use window reference
+    // @ts-ignore - Use the stored channel reference
+    window.gameRoomChannel.send({
+      type: 'broadcast',
+      event: 'fetch_new_round',
+      payload: { loading: true }
+    })
+    
     try {
       // Reset state in advance (for UI responsiveness) - explicit reset is possible for the next round
       setSubmittedAnswer(false)
@@ -784,6 +805,15 @@ export default function GameRoom({ params }: { params: { id: string } }) {
           description: "Thanks for playing!",
         })
         setFetchingNewRound(false)
+        
+        // Broadcast to other players that we're done fetching
+        // @ts-ignore - Use the stored channel reference
+        window.gameRoomChannel.send({
+          type: 'broadcast',
+          event: 'fetch_new_round',
+          payload: { loading: false }
+        })
+        
         return
       }
       
@@ -945,6 +975,18 @@ export default function GameRoom({ params }: { params: { id: string } }) {
           }
         }
       }, 700) // さらに待機時間を延長
+      
+      // After successful round creation or on error
+      setFetchingNewRound(false)
+      
+      // Broadcast to other players that we're done fetching
+      // @ts-ignore - Use the stored channel reference
+      window.gameRoomChannel.send({
+        type: 'broadcast',
+        event: 'fetch_new_round',
+        payload: { loading: false }
+      })
+      
     } catch (error) {
       console.error('Error starting next round:', error)
       const nextRoundNumber = gameData.current_round + 1;
@@ -960,11 +1002,14 @@ export default function GameRoom({ params }: { params: { id: string } }) {
       })
       setLoading(false)
       setFetchingNewRound(false)
-    } finally {
-      // Ensure the loading state is cleared even if there's an error
-      setTimeout(() => {
-        setFetchingNewRound(false)
-      }, 1000)
+      
+      // Broadcast to other players that we're done fetching
+      // @ts-ignore - Use the stored channel reference
+      window.gameRoomChannel.send({
+        type: 'broadcast',
+        event: 'fetch_new_round',
+        payload: { loading: false }
+      })
     }
   }
   
@@ -987,6 +1032,14 @@ export default function GameRoom({ params }: { params: { id: string } }) {
       setLoading(true);
       setFetchingNewRound(true);
       
+      // Broadcast to other players that we're fetching a new round
+      // @ts-ignore - Use the stored channel reference
+      window.gameRoomChannel.send({
+        type: 'broadcast',
+        event: 'fetch_new_round',
+        payload: { loading: true }
+      });
+      
       console.log(`Retrying creation for round ${roundNumber}`);
       
       // Create the round again
@@ -1007,6 +1060,16 @@ export default function GameRoom({ params }: { params: { id: string } }) {
           // Check if we get the same error again
           if (errorMessage === 'Failed to fetch code from any repository after multiple attempts') {
             setLoading(false);
+            setFetchingNewRound(false);
+            
+            // Broadcast to other players that we're done fetching
+            // @ts-ignore - Use the stored channel reference
+            window.gameRoomChannel.send({
+              type: 'broadcast',
+              event: 'fetch_new_round',
+              payload: { loading: false }
+            });
+            
             toast({
               title: "Still unable to fetch code",
               description: "Failed to fetch code after retrying. Would you like to try again?",
@@ -1063,6 +1126,14 @@ export default function GameRoom({ params }: { params: { id: string } }) {
       
       setLoading(false);
       setFetchingNewRound(false);
+      
+      // Broadcast to other players that we're done fetching
+      // @ts-ignore - Use the stored channel reference
+      window.gameRoomChannel.send({
+        type: 'broadcast',
+        event: 'fetch_new_round',
+        payload: { loading: false }
+      });
     } catch (error) {
       console.error('Error retrying round creation:', error);
       toast({
@@ -1072,6 +1143,14 @@ export default function GameRoom({ params }: { params: { id: string } }) {
       });
       setLoading(false);
       setFetchingNewRound(false);
+      
+      // Broadcast to other players that we're done fetching
+      // @ts-ignore - Use the stored channel reference
+      window.gameRoomChannel.send({
+        type: 'broadcast',
+        event: 'fetch_new_round',
+        payload: { loading: false }
+      });
     }
   };
   

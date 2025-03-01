@@ -15,6 +15,100 @@ const openai = new OpenAI({
 // GitHub token for API requests (optional but helps with rate limiting)
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
+// ギフハブAPIの呼び出し試行回数を制限するためのカウンター
+let githubApiAttempts = 0;
+const MAX_GITHUB_API_ATTEMPTS = 3;
+
+// ギフハブAPIの呼び出し数をリセットする関数
+function resetGithubApiAttempts() {
+  githubApiAttempts = 0;
+}
+
+// ギフハブAPIの呼び出し数をインクリメントし、制限に達したかチェックする関数
+function incrementAndCheckGithubApiAttempts(): boolean {
+  githubApiAttempts++;
+  console.log(`[DEBUG] GitHub API attempt ${githubApiAttempts}/${MAX_GITHUB_API_ATTEMPTS}`);
+  return githubApiAttempts <= MAX_GITHUB_API_ATTEMPTS;
+}
+
+// Function to check if GitHub API data exists in Supabase cache
+async function checkGitHubCache(owner: string, repo: string, path: string = '', type: 'directory' | 'file' = 'directory') {
+  console.log(`[DEBUG] Checking GitHub cache for ${owner}/${repo}/${path} (type: ${type})`);
+  
+  try {
+    const { data, error } = await supabase
+      .from('github_cache')
+      .select('*')
+      .eq('owner', owner)
+      .eq('repo', repo)
+      .eq('path', path)
+      .eq('content_type', type)
+      .single();
+    
+    if (error) {
+      if (error.code === 'PGRST116') {
+        // No results found, this is expected when cache is empty
+        console.log(`[DEBUG] No cache entry found for ${owner}/${repo}/${path}`);
+        return null;
+      }
+      
+      console.error(`[ERROR] Error checking GitHub cache:`, error);
+      return null;
+    }
+    
+    console.log(`[DEBUG] Cache hit for ${owner}/${repo}/${path}, last accessed: ${data.last_accessed}`);
+    
+    // Update last_accessed time
+    const { error: updateError } = await supabase
+      .from('github_cache')
+      .update({ last_accessed: new Date().toISOString() })
+      .eq('id', data.id);
+    
+    if (updateError) {
+      console.error(`[ERROR] Failed to update last_accessed time:`, updateError);
+    }
+    
+    return data;
+  } catch (error) {
+    console.error(`[ERROR] Exception in checkGitHubCache for ${owner}/${repo}/${path}:`, error);
+    return null;
+  }
+}
+
+// Function to store GitHub API data in Supabase cache
+async function storeGitHubCache(owner: string, repo: string, path: string, url: string, content: any, type: 'directory' | 'file' = 'directory') {
+  console.log(`[DEBUG] Storing GitHub data in cache for ${owner}/${repo}/${path} (type: ${type})`);
+  
+  const contentStr = typeof content === 'string' ? content : JSON.stringify(content);
+  
+  try {
+    const { data, error } = await supabase
+      .from('github_cache')
+      .insert({
+        owner,
+        repo,
+        path,
+        url,
+        content: contentStr,
+        content_type: type,
+        last_accessed: new Date().toISOString()
+      })
+      .select()
+      .single();
+    
+    if (error) {
+      console.error(`[ERROR] Failed to store GitHub data in cache:`, error);
+      return false;
+    }
+    
+    console.log(`[DEBUG] Successfully stored GitHub data in cache, id: ${data.id}`);
+    return true;
+  } catch (error) {
+    console.error(`[ERROR] Exception in storeGitHubCache for ${owner}/${repo}/${path}:`, error);
+    return false;
+  }
+}
+
 // List of popular GitHub repositories to select from
 const popularRepos = [
   {
@@ -693,8 +787,32 @@ interface CodeFile {
 
 // Function to fetch files from a repository
 async function fetchRepoFiles(owner: string, repo: string, path: string = '') {
+  console.log(`[DEBUG] Fetching repo files from ${owner}/${repo}/${path}`);
+  
+  // First check if the data exists in cache
+  const cachedData = await checkGitHubCache(owner, repo, path, 'directory');
+  if (cachedData) {
+    console.log(`[DEBUG] Using cached data for ${owner}/${repo}/${path}`);
+    try {
+      return JSON.parse(cachedData.content);
+    } catch (error) {
+      console.error(`[ERROR] Failed to parse cached JSON content:`, error);
+      // Continue with GitHub API call if cache parsing fails
+    }
+  }
+
+  // 試行回数の制限をチェック
+  if (!incrementAndCheckGithubApiAttempts()) {
+    console.log(`[DEBUG] GitHub API attempt limit reached, looking for cached data instead`);
+    const fallbackCachedData = await getRandomCachedDirectory();
+    if (fallbackCachedData) {
+      return fallbackCachedData;
+    }
+    throw new Error(`GitHub API attempt limit reached and no cached directories available`);
+  }
+  
   const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
-  console.log(`[DEBUG] Fetching repo files from: ${url}`);
+  console.log(`[DEBUG] No cache hit, fetching from GitHub API: ${url}`);
   
   const headers: HeadersInit = {
     'Accept': 'application/vnd.github.v3+json',
@@ -725,6 +843,7 @@ async function fetchRepoFiles(owner: string, repo: string, path: string = '') {
       
       if (response.status === 403 && rateLimit.remaining === '0') {
         console.error(`[ERROR] Rate limit exceeded. Reset at ${new Date(parseInt(rateLimit.reset || '0') * 1000).toLocaleString()}`);
+        throw new Error(`GitHub API rate limit exceeded`);
       }
       
       throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
@@ -732,6 +851,10 @@ async function fetchRepoFiles(owner: string, repo: string, path: string = '') {
 
     const data = await response.json();
     console.log(`[DEBUG] Successfully fetched ${Array.isArray(data) ? data.length : 1} items from ${url}`);
+    
+    // Store the fetched data in cache
+    await storeGitHubCache(owner, repo, path, url, data, 'directory');
+    
     return data;
   } catch (error) {
     console.error(`[ERROR] Exception in fetchRepoFiles for ${owner}/${repo}/${path}:`, error);
@@ -739,10 +862,85 @@ async function fetchRepoFiles(owner: string, repo: string, path: string = '') {
   }
 }
 
+// Function to get random cached directory data when GitHub API calls fail
+async function getRandomCachedDirectory(): Promise<any[] | null> {
+  console.log(`[DEBUG] Trying to get random cached directory data due to GitHub API failures`);
+  
+  try {
+    // Get a list of cached directories
+    const { data: cachedDirs, error } = await supabase
+      .from('github_cache')
+      .select('*')
+      .eq('content_type', 'directory')
+      .order('last_accessed', { ascending: false })
+      .limit(50); // Get the 50 most recently accessed directories
+    
+    if (error) {
+      console.error(`[ERROR] Error retrieving cached directories:`, error);
+      return null;
+    }
+    
+    if (!cachedDirs || cachedDirs.length === 0) {
+      console.log(`[DEBUG] No cached directories available`);
+      return null;
+    }
+    
+    console.log(`[DEBUG] Found ${cachedDirs.length} cached directories to choose from`);
+    
+    // Select a random directory from the cache
+    const randomDir = cachedDirs[Math.floor(Math.random() * cachedDirs.length)];
+    console.log(`[DEBUG] Selected random cached directory: ${randomDir.owner}/${randomDir.repo}/${randomDir.path}`);
+    
+    // Update last_accessed time
+    const { error: updateError } = await supabase
+      .from('github_cache')
+      .update({ last_accessed: new Date().toISOString() })
+      .eq('id', randomDir.id);
+    
+    if (updateError) {
+      console.error(`[ERROR] Failed to update last_accessed time:`, updateError);
+    }
+    
+    // Parse the directory content
+    try {
+      return JSON.parse(randomDir.content);
+    } catch (parseError) {
+      console.error(`[ERROR] Failed to parse cached directory content:`, parseError);
+      return null;
+    }
+  } catch (error) {
+    console.error(`[ERROR] Exception in getRandomCachedDirectory:`, error);
+    return null;
+  }
+}
+
 // Function to fetch a specific file content
 async function fetchFileContent(owner: string, repo: string, path: string): Promise<CodeFile> {
+  console.log(`[DEBUG] Fetching file content from ${owner}/${repo}/${path}`);
+  
+  // First check if the data exists in cache
+  const cachedData = await checkGitHubCache(owner, repo, path, 'file');
+  if (cachedData) {
+    console.log(`[DEBUG] Using cached file content for ${owner}/${repo}/${path}`);
+    return {
+      content: cachedData.content,
+      url: cachedData.url,
+      path: cachedData.path
+    };
+  }
+
+  // 試行回数の制限をチェック
+  if (!incrementAndCheckGithubApiAttempts()) {
+    console.log(`[DEBUG] GitHub API attempt limit reached, looking for cached file instead`);
+    const cachedFile = await getRandomCachedFile();
+    if (cachedFile) {
+      return cachedFile;
+    }
+    throw new Error(`GitHub API attempt limit reached and no cached files available`);
+  }
+  
   const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
-  console.log(`[DEBUG] Fetching file content from: ${url}`);
+  console.log(`[DEBUG] No cache hit, fetching file from GitHub API: ${url}`);
   
   const headers: HeadersInit = {
     'Accept': 'application/vnd.github.v3+json',
@@ -770,6 +968,7 @@ async function fetchFileContent(owner: string, repo: string, path: string): Prom
       
       if (response.status === 403 && rateLimit.remaining === '0') {
         console.error(`[ERROR] Rate limit exceeded. Reset at ${new Date(parseInt(rateLimit.reset || '0') * 1000).toLocaleString()}`);
+        throw new Error(`GitHub API rate limit exceeded`);
       }
       
       throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
@@ -781,11 +980,17 @@ async function fetchFileContent(owner: string, repo: string, path: string): Prom
     if (data.content) {
       console.log(`[DEBUG] Successfully fetched file content for ${path}, size: ${data.size} bytes`);
       const content = Buffer.from(data.content, 'base64').toString('utf-8');
-      return {
+      
+      const codeFile = {
         content,
         url: data.html_url,
         path: data.path
       };
+      
+      // Store the fetched file content in cache
+      await storeGitHubCache(owner, repo, path, data.html_url, content, 'file');
+      
+      return codeFile;
     }
     
     console.error(`[ERROR] No content found in file ${path}`);
@@ -802,9 +1007,63 @@ function isCodeFile(filename: string) {
   return codeExtensions.some(ext => filename.toLowerCase().endsWith(ext));
 }
 
+// Function to get random cached code files when GitHub API rate limit is hit
+async function getRandomCachedFile(): Promise<CodeFile | null> {
+  console.log(`[DEBUG] Trying to get a random cached file due to GitHub API rate limits`);
+  
+  try {
+    // Get a list of all cached files
+    const { data: cachedFiles, error } = await supabase
+      .from('github_cache')
+      .select('*')
+      .eq('content_type', 'file')
+      .order('last_accessed', { ascending: false })
+      .limit(100); // Get the 100 most recently accessed files
+    
+    if (error) {
+      console.error(`[ERROR] Error retrieving cached files:`, error);
+      return null;
+    }
+    
+    if (!cachedFiles || cachedFiles.length === 0) {
+      console.log(`[DEBUG] No cached files available`);
+      return null;
+    }
+    
+    console.log(`[DEBUG] Found ${cachedFiles.length} cached files to choose from`);
+    
+    // Select a random file from the cache
+    const randomFile = cachedFiles[Math.floor(Math.random() * cachedFiles.length)];
+    console.log(`[DEBUG] Selected random cached file: ${randomFile.owner}/${randomFile.repo}/${randomFile.path}`);
+    
+    // Update last_accessed time
+    const { error: updateError } = await supabase
+      .from('github_cache')
+      .update({ last_accessed: new Date().toISOString() })
+      .eq('id', randomFile.id);
+    
+    if (updateError) {
+      console.error(`[ERROR] Failed to update last_accessed time:`, updateError);
+    }
+    
+    return {
+      content: randomFile.content,
+      url: randomFile.url,
+      path: randomFile.path
+    };
+  } catch (error) {
+    console.error(`[ERROR] Exception in getRandomCachedFile:`, error);
+    return null;
+  }
+}
+
 // Function to get a random interesting code file from a repository
 async function getRandomCodeFile(owner: string, repo: string): Promise<CodeFile> {
   console.log(`[DEBUG] Getting random code file from ${owner}/${repo}`);
+  
+  // GitHubの試行回数をリセット（新しいリクエストの開始）
+  resetGithubApiAttempts();
+  
   try {
     // First, get the list of directories in the repo
     console.log(`[DEBUG] Fetching root directories for ${owner}/${repo}`);
@@ -886,6 +1145,20 @@ async function getRandomCodeFile(owner: string, repo: string): Promise<CodeFile>
     return await fetchFileContent(owner, repo, randomFile.path);
   } catch (error) {
     console.error(`[ERROR] Error getting random code file from ${owner}/${repo}:`, error);
+    
+    // Check if the error is due to GitHub API rate limit or attempt limit
+    if ((error instanceof Error && error.message && error.message.includes('rate limit exceeded')) ||
+        (error instanceof Error && error.message && error.message.includes('API attempt limit'))) {
+      console.log(`[DEBUG] GitHub API issue, trying to use cached files`);
+      
+      // Try to get a random cached file
+      const cachedFile = await getRandomCachedFile();
+      if (cachedFile) {
+        console.log(`[DEBUG] Successfully retrieved random cached file as fallback`);
+        return cachedFile;
+      }
+    }
+    
     throw error;
   }
 }
@@ -1042,6 +1315,9 @@ const gameRepoHistory: Record<string, string[]> = {};
 
 export async function POST(request: Request) {
   try {
+    // 新しいリクエスト開始時にGitHub API試行回数をリセット
+    resetGithubApiAttempts();
+    
     const { gameId, roundNumber } = await request.json();
     console.log(`[DEBUG] Creating round ${roundNumber} for game ${gameId}`);
     
@@ -1275,78 +1551,135 @@ export async function POST(request: Request) {
   }
 }
 
-// Function to get a random code file with appropriate complexity and minimum line count
+// Function to find code with appropriate complexity from a repo
 async function getAppropriateCodeFile(owner: string, repo: string, minComplexity: number = 4) {
-  console.log(`[DEBUG] Searching for appropriate code file in ${owner}/${repo} with min complexity ${minComplexity}`);
+  console.log(`[DEBUG] Looking for code file with minimum complexity ${minComplexity} from ${owner}/${repo}`);
   
-  // Try up to 12 times to find an appropriately complex file with enough code lines
-  for (let attempt = 0; attempt < 12; attempt++) {
-    console.log(`[DEBUG] Attempt ${attempt+1}/12 to find appropriate file from ${owner}/${repo}`);
+  // GitHubの試行回数をリセット（新しいリクエストの開始）
+  resetGithubApiAttempts();
+  
+  try {
+    const MAX_ATTEMPTS = 5;
+    let attemptCount = 0;
+    let bestFile: any = null;
+    let bestComplexity = 0;
     
-    try {
-      // Get a random code file
-      const codeData = await getRandomCodeFile(owner, repo);
-      console.log(`[DEBUG] Retrieved file: ${codeData.path}`);
+    while (attemptCount < MAX_ATTEMPTS) {
+      attemptCount++;
+      console.log(`[DEBUG] Attempt ${attemptCount}/${MAX_ATTEMPTS} to find appropriate code file`);
       
-      // Get the language from the file path
-      const language = getLanguageFromPath(codeData.path);
-      console.log(`[DEBUG] Detected language: ${language}`);
-      
-      // Remove comments from the code
-      console.log(`[DEBUG] Removing comments from file content`);
-      const cleanCode = removeComments(codeData.content, language);
-      
-      // Count non-comment lines
-      const codeLineCount = countCodeLines(cleanCode);
-      console.log(`[DEBUG] File ${codeData.path} has ${codeLineCount} lines of code (excluding comments)`);
-      
-      // Progressively reduce line count requirement in later attempts
-      const minLines = attempt < 8 ? 100 : (attempt < 10 ? 80 : 60);
-      console.log(`[DEBUG] Current minimum line requirement: ${minLines}`);
-      
-      // Check if the file has enough lines of code
-      if (codeLineCount < minLines) {
-        console.log(`[DEBUG] File ${codeData.path} has fewer than ${minLines} lines of code (${codeLineCount}), trying again...`);
-        continue;
-      }
-      
-      // Analyze the complexity
-      console.log(`[DEBUG] Analyzing complexity of ${codeData.path}`);
-      const analysis = await analyzeCode(
-        cleanCode,
-        codeData.path,
-        language
-      );
-      
-      console.log(`[DEBUG] Analysis result for ${codeData.path}: complexity=${analysis.complexity}, description="${analysis.description.substring(0, 50)}..."`);
-      
-      // If complexity is sufficient, return it
-      // Progressively reduce complexity requirement in later attempts
-      const targetComplexity = attempt < 8 ? minComplexity : Math.max(2, minComplexity - 1);
-      console.log(`[DEBUG] Current target complexity: ${targetComplexity}`);
-      
-      if (analysis.complexity >= targetComplexity) {
-        console.log(`[DEBUG] File ${codeData.path} meets criteria with complexity ${analysis.complexity} ≥ ${targetComplexity}`);
-        return {
-          ...codeData,
-          content: cleanCode, // Return the code with comments removed
-          description: analysis.description,
-          complexity: analysis.complexity
-        };
-      } else {
-        console.log(`[DEBUG] File ${codeData.path} complexity too low (${analysis.complexity} < ${targetComplexity}), trying again...`);
-      }
-    } catch (error) {
-      console.error(`[ERROR] Attempt ${attempt + 1} failed for ${owner}/${repo}:`, error);
-      if (attempt === 11) {
-        console.error(`[ERROR] All attempts exhausted for ${owner}/${repo}`);
-        throw error; // Re-throw on last attempt
+      try {
+        // Get a random file from the repo
+        const codeFile = await getRandomCodeFile(owner, repo);
+        
+        // Detect language from file path
+        const language = getLanguageFromPath(codeFile.path);
+        console.log(`[DEBUG] Found file ${codeFile.path} with language ${language}`);
+        
+        // Clean code (remove comments)
+        const cleanCode = removeComments(codeFile.content, language);
+        
+        // Count actual code lines (excluding comments and blank lines)
+        const codeLineCount = countCodeLines(cleanCode);
+        console.log(`[DEBUG] File has ${codeLineCount} lines of code`);
+        
+        // Skip files that are too short
+        if (codeLineCount < 10) {
+          console.log(`[DEBUG] File too short (${codeLineCount} lines), skipping`);
+          continue;
+        }
+        
+        // Skip files that are too long
+        if (codeLineCount > 200) {
+          console.log(`[DEBUG] File too long (${codeLineCount} lines), skipping`);
+          continue;
+        }
+        
+        // Analyze the code to get a complexity score
+        const analysis = await analyzeCode(codeFile.content, codeFile.path, language);
+        console.log(`[DEBUG] Analysis for ${codeFile.path}:`, analysis);
+        
+        // Check if this file meets our requirements
+        if (analysis.complexity >= minComplexity) {
+          console.log(`[DEBUG] Found suitable file on attempt ${attemptCount}: ${codeFile.path} (complexity: ${analysis.complexity})`);
+          return {
+            ...codeFile,
+            description: analysis.description,
+            complexity: analysis.complexity
+          };
+        }
+        
+        // Keep track of the best file we've found so far
+        if (analysis.complexity > bestComplexity) {
+          bestFile = {
+            ...codeFile,
+            description: analysis.description,
+            complexity: analysis.complexity
+          };
+          bestComplexity = analysis.complexity;
+          console.log(`[DEBUG] New best file: ${codeFile.path} (complexity: ${analysis.complexity})`);
+        }
+      } catch (attemptError) {
+        console.error(`[ERROR] Error in attempt ${attemptCount}:`, attemptError);
+        
+        // Check if the error is due to GitHub API rate limit
+        if (attemptError instanceof Error && attemptError.message && attemptError.message.includes('rate limit exceeded')) {
+          console.log(`[DEBUG] GitHub API rate limit exceeded, trying to use cached files`);
+          
+          // Try to get a random cached file
+          const cachedFile = await getRandomCachedFile();
+          if (cachedFile) {
+            console.log(`[DEBUG] Successfully retrieved random cached file as fallback`);
+            const language = getLanguageFromPath(cachedFile.path);
+            const analysis = await analyzeCode(cachedFile.content, cachedFile.path, language);
+            
+            return {
+              ...cachedFile,
+              description: analysis.description,
+              complexity: analysis.complexity || 4 // Default to minimal complexity if analysis fails
+            };
+          }
+          
+          // If we can't get a cached file, rethrow the error
+          throw attemptError;
+        }
       }
     }
+    
+    // If we couldn't find a file that meets the minimum complexity,
+    // return the best file we found (or throw an error if we didn't find any)
+    if (bestFile) {
+      console.log(`[DEBUG] Couldn't find file meeting minimum complexity ${minComplexity}, using best found: ${bestFile.path} (complexity: ${bestComplexity})`);
+      return bestFile;
+    }
+    
+    console.error(`[ERROR] Failed to find any suitable code files after ${MAX_ATTEMPTS} attempts`);
+    throw new Error(`Failed to find suitable code after ${MAX_ATTEMPTS} attempts`);
+  } catch (error) {
+    console.error(`[ERROR] Error in getAppropriateCodeFile:`, error);
+    
+    // Check if the error is due to GitHub API rate limit or attempt limit
+    if ((error instanceof Error && error.message && error.message.includes('rate limit exceeded')) ||
+        (error instanceof Error && error.message && error.message.includes('API attempt limit'))) {
+      console.log(`[DEBUG] GitHub API issue, trying to use cached files`);
+      
+      // Try to get a random cached file
+      const cachedFile = await getRandomCachedFile();
+      if (cachedFile) {
+        console.log(`[DEBUG] Successfully retrieved random cached file as fallback`);
+        const language = getLanguageFromPath(cachedFile.path);
+        const analysis = await analyzeCode(cachedFile.content, cachedFile.path, language);
+        
+        return {
+          ...cachedFile,
+          description: analysis.description,
+          complexity: analysis.complexity || 4 // Default to minimal complexity if analysis fails
+        };
+      }
+    }
+    
+    throw error;
   }
-  
-  console.error(`[ERROR] Could not find appropriate file in ${owner}/${repo} after 12 attempts`);
-  throw new Error('Could not find a file with appropriate complexity and minimum line count');
 }
 
 // Fallback function for finding any valid code when all else fails
