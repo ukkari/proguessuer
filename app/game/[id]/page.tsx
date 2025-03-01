@@ -82,6 +82,9 @@ export default function GameRoom({ params }: { params: { id: string } }) {
         setCurrentRound(round)
         setTimeLeft(round.time_limit)
         
+        // Clear any loading state for all players when round is successfully fetched
+        setFetchingNewRound(false)
+        
         // Only reset state if needed (if different from current round or during initialization)
         if (!currentRound || currentRound.round_number !== round.round_number) {
           console.log("New round detected, checking existing answers")
@@ -252,15 +255,21 @@ export default function GameRoom({ params }: { params: { id: string } }) {
             // Make sure to reset answer state when the round changes
             setSubmittedAnswer(false)
             
-            // Clear input content for non-host players
+            // Show the fetching state for non-host players when round changes
             if (!isHost) {
-              console.log("Non-host player, clearing answer input")
+              console.log("Non-host player, showing loading during round transition")
               setAnswer('')
+              setFetchingNewRound(true)
             }
             
             // Update round immediately if round changed
             console.log("Fetching new round data after game change")
             await fetchCurrentRound(payload.new.id, payload.new.current_round)
+            
+            // Clear the fetching state after round data is loaded
+            if (!isHost) {
+              setFetchingNewRound(false)
+            }
           }
           
           // Update state when game status changes
@@ -284,6 +293,37 @@ export default function GameRoom({ params }: { params: { id: string } }) {
     // Improved rounds subscription with better error handling and more frequent polling
     const roundsSubscription = supabase
       .channel(`rounds:${gameId}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'rounds', 
+        filter: `game_room_id=eq.${gameId}`
+      }, async (payload) => {
+        console.log("New round created:", payload.new)
+        
+        // Clear fetching state when we detect a new round was created
+        setFetchingNewRound(false)
+        
+        try {
+          // Update our local state with the new round
+          setCurrentRound(payload.new)
+          setTimeLeft(payload.new.time_limit)
+          setSubmittedAnswer(false)
+          
+          // Get latest game data
+          const { data: latestGame } = await supabase
+            .from('game_rooms')
+            .select('*')
+            .eq('id', gameId)
+            .single()
+            
+          if (latestGame) {
+            setGameData(latestGame)
+          }
+        } catch (error) {
+          console.error("Error handling new round:", error)
+        }
+      })
       .on('postgres_changes', {
         event: 'UPDATE',
         schema: 'public',
@@ -354,44 +394,6 @@ export default function GameRoom({ params }: { params: { id: string } }) {
           }
         } catch (err) {
           console.error("Error processing round update:", err)
-        }
-      })
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'rounds',
-        filter: `game_room_id=eq.${gameId}`
-      }, async (payload) => {
-        console.log("New round created:", payload.new)
-        
-        try {
-          // We have a new round, let's make sure we have the latest game data first
-          await fetchGameData()
-          
-          // Then specifically fetch this new round
-          const { data: newRound, error } = await supabase
-            .from('rounds')
-            .select('*')
-            .eq('id', payload.new.id)
-            .single()
-            
-          if (error) throw error
-          
-          if (newRound) {
-            console.log("Setting new round data:", newRound)
-            setCurrentRound(newRound)
-            setTimeLeft(newRound.time_limit)
-            // Always reset submitted state for ALL players when a new round is created
-            setSubmittedAnswer(false)
-            
-            // Clear input content for non-host players
-            if (!isHost) {
-              console.log("Non-host player, clearing answer on new round creation")
-              setAnswer('')
-            }
-          }
-        } catch (err) {
-          console.error("Error processing new round:", err)
         }
       })
       .subscribe((status) => {
@@ -958,16 +960,34 @@ export default function GameRoom({ params }: { params: { id: string } }) {
       })
       setLoading(false)
       setFetchingNewRound(false)
+    } finally {
+      // Ensure the loading state is cleared even if there's an error
+      setTimeout(() => {
+        setFetchingNewRound(false)
+      }, 1000)
     }
   }
   
-  // Add new function to retry creating a round
+  // Add a safety timeout for the loading state
+  useEffect(() => {
+    // If fetchingNewRound is true, set a timeout to clear it after a maximum time
+    if (fetchingNewRound) {
+      const safetyTimeout = setTimeout(() => {
+        console.log("[Safety timeout] Clearing fetchingNewRound state after timeout")
+        setFetchingNewRound(false)
+      }, 15000) // 15 seconds maximum loading time
+      
+      return () => clearTimeout(safetyTimeout)
+    }
+  }, [fetchingNewRound])
+  
+  // Update the retryCreateRound function to properly handle loading states
   const retryCreateRound = async (roundNumber: number) => {
-    setLoading(true);
-    setFetchingNewRound(true);
-    
     try {
-      console.log(`Retrying to create round ${roundNumber}`);
+      setLoading(true);
+      setFetchingNewRound(true);
+      
+      console.log(`Retrying creation for round ${roundNumber}`);
       
       // Create the round again
       const response = await fetch('/api/game/create-round', {

@@ -694,25 +694,56 @@ interface CodeFile {
 // Function to fetch files from a repository
 async function fetchRepoFiles(owner: string, repo: string, path: string = '') {
   const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
+  console.log(`[DEBUG] Fetching repo files from: ${url}`);
+  
   const headers: HeadersInit = {
     'Accept': 'application/vnd.github.v3+json',
   };
   
   if (GITHUB_TOKEN) {
     headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+    console.log(`[DEBUG] Using GitHub token for authentication`);
+  } else {
+    console.log(`[DEBUG] No GitHub token provided, may hit rate limits`);
   }
 
-  const response = await fetch(url, { headers });
-  if (!response.ok) {
-    throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
-  }
+  try {
+    const response = await fetch(url, { headers });
+    
+    // Log rate limit information if available
+    const rateLimit = {
+      limit: response.headers.get('x-ratelimit-limit'),
+      remaining: response.headers.get('x-ratelimit-remaining'),
+      reset: response.headers.get('x-ratelimit-reset')
+    };
+    console.log(`[DEBUG] GitHub API rate limit info:`, rateLimit);
+    
+    if (!response.ok) {
+      console.error(`[ERROR] GitHub API error for ${url}: ${response.status} ${response.statusText}`);
+      const responseText = await response.text();
+      console.error(`[ERROR] Response body: ${responseText.substring(0, 200)}...`);
+      
+      if (response.status === 403 && rateLimit.remaining === '0') {
+        console.error(`[ERROR] Rate limit exceeded. Reset at ${new Date(parseInt(rateLimit.reset || '0') * 1000).toLocaleString()}`);
+      }
+      
+      throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
+    }
 
-  return response.json();
+    const data = await response.json();
+    console.log(`[DEBUG] Successfully fetched ${Array.isArray(data) ? data.length : 1} items from ${url}`);
+    return data;
+  } catch (error) {
+    console.error(`[ERROR] Exception in fetchRepoFiles for ${owner}/${repo}/${path}:`, error);
+    throw error;
+  }
 }
 
 // Function to fetch a specific file content
 async function fetchFileContent(owner: string, repo: string, path: string): Promise<CodeFile> {
   const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
+  console.log(`[DEBUG] Fetching file content from: ${url}`);
+  
   const headers: HeadersInit = {
     'Accept': 'application/vnd.github.v3+json',
   };
@@ -721,24 +752,48 @@ async function fetchFileContent(owner: string, repo: string, path: string): Prom
     headers['Authorization'] = `token ${GITHUB_TOKEN}`;
   }
 
-  const response = await fetch(url, { headers });
-  if (!response.ok) {
-    throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
-  }
-
-  const data = await response.json();
-  
-  // Content is base64 encoded
-  if (data.content) {
-    const content = Buffer.from(data.content, 'base64').toString('utf-8');
-    return {
-      content,
-      url: data.html_url,
-      path: data.path
+  try {
+    const response = await fetch(url, { headers });
+    
+    // Log rate limit information
+    const rateLimit = {
+      limit: response.headers.get('x-ratelimit-limit'),
+      remaining: response.headers.get('x-ratelimit-remaining'),
+      reset: response.headers.get('x-ratelimit-reset')
     };
+    console.log(`[DEBUG] GitHub API rate limit info:`, rateLimit);
+    
+    if (!response.ok) {
+      console.error(`[ERROR] GitHub API error for ${url}: ${response.status} ${response.statusText}`);
+      const responseText = await response.text();
+      console.error(`[ERROR] Response body: ${responseText.substring(0, 200)}...`);
+      
+      if (response.status === 403 && rateLimit.remaining === '0') {
+        console.error(`[ERROR] Rate limit exceeded. Reset at ${new Date(parseInt(rateLimit.reset || '0') * 1000).toLocaleString()}`);
+      }
+      
+      throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    
+    // Content is base64 encoded
+    if (data.content) {
+      console.log(`[DEBUG] Successfully fetched file content for ${path}, size: ${data.size} bytes`);
+      const content = Buffer.from(data.content, 'base64').toString('utf-8');
+      return {
+        content,
+        url: data.html_url,
+        path: data.path
+      };
+    }
+    
+    console.error(`[ERROR] No content found in file ${path}`);
+    throw new Error('No content found in file');
+  } catch (error) {
+    console.error(`[ERROR] Exception in fetchFileContent for ${owner}/${repo}/${path}:`, error);
+    throw error;
   }
-  
-  throw new Error('No content found in file');
 }
 
 // Function to check if a file is a code file we're interested in
@@ -749,8 +804,10 @@ function isCodeFile(filename: string) {
 
 // Function to get a random interesting code file from a repository
 async function getRandomCodeFile(owner: string, repo: string): Promise<CodeFile> {
+  console.log(`[DEBUG] Getting random code file from ${owner}/${repo}`);
   try {
     // First, get the list of directories in the repo
+    console.log(`[DEBUG] Fetching root directories for ${owner}/${repo}`);
     const dirs = await fetchRepoFiles(owner, repo);
     
     // Look for likely code directories
@@ -761,53 +818,74 @@ async function getRandomCodeFile(owner: string, repo: string): Promise<CodeFile>
         return ['src', 'lib', 'core', 'main', 'utils', 'helpers', 'components', 'packages'].includes(dirName);
       });
     
+    console.log(`[DEBUG] Found ${codeDirs.length} potential code directories out of ${dirs.length} total directories`);
+    
     // If we don't find any code dirs, select from all dirs
     const targetDirs = codeDirs.length > 0 ? codeDirs : dirs.filter((item: any) => item.type === 'dir');
+    console.log(`[DEBUG] Using ${targetDirs.length} target directories for file search`);
     
     // If no directories, try to find code files at the root
     if (targetDirs.length === 0) {
+      console.log(`[DEBUG] No directories found, looking for code files at root level`);
       const rootFiles = dirs.filter((item: any) => item.type === 'file' && isCodeFile(item.name));
+      console.log(`[DEBUG] Found ${rootFiles.length} code files at root level`);
+      
       if (rootFiles.length === 0) {
+        console.error(`[ERROR] No suitable code files found in repository ${owner}/${repo}`);
         throw new Error('No suitable code files found in repository');
       }
       
       const randomFile = rootFiles[Math.floor(Math.random() * rootFiles.length)];
+      console.log(`[DEBUG] Selected random root file: ${randomFile.path}`);
       return await fetchFileContent(owner, repo, randomFile.path);
     }
     
     // Select a random directory
     const randomDir = targetDirs[Math.floor(Math.random() * targetDirs.length)];
+    console.log(`[DEBUG] Selected random directory: ${randomDir.path}`);
     
     // Get files from that directory
+    console.log(`[DEBUG] Fetching files from directory: ${randomDir.path}`);
     const files = await fetchRepoFiles(owner, repo, randomDir.path);
     
     // Filter for code files
     const codeFiles = files.filter((item: any) => item.type === 'file' && isCodeFile(item.name));
+    console.log(`[DEBUG] Found ${codeFiles.length} code files in directory ${randomDir.path}`);
     
     // If no code files in this directory, try another approach
     if (codeFiles.length === 0) {
+      console.log(`[DEBUG] No code files found in ${randomDir.path}, trying nested directories`);
       // Try a nested directory if available
       const nestedDirs = files.filter((item: any) => item.type === 'dir');
+      console.log(`[DEBUG] Found ${nestedDirs.length} nested directories to try`);
+      
       if (nestedDirs.length > 0) {
         const randomNestedDir = nestedDirs[Math.floor(Math.random() * nestedDirs.length)];
+        console.log(`[DEBUG] Trying nested directory: ${randomNestedDir.path}`);
+        
         const nestedFiles = await fetchRepoFiles(owner, repo, randomNestedDir.path);
         const nestedCodeFiles = nestedFiles.filter((item: any) => item.type === 'file' && isCodeFile(item.name));
+        console.log(`[DEBUG] Found ${nestedCodeFiles.length} code files in nested directory ${randomNestedDir.path}`);
         
         if (nestedCodeFiles.length > 0) {
           const randomNestedFile = nestedCodeFiles[Math.floor(Math.random() * nestedCodeFiles.length)];
+          console.log(`[DEBUG] Selected random file from nested directory: ${randomNestedFile.path}`);
           return await fetchFileContent(owner, repo, randomNestedFile.path);
         }
+        console.log(`[DEBUG] No code files in nested directory, trying root again`);
       }
       
       // If still no files, search in root again
+      console.log(`[DEBUG] Recursively calling getRandomCodeFile for ${owner}/${repo}`);
       return await getRandomCodeFile(owner, repo);
     }
     
     // Select a random code file
     const randomFile = codeFiles[Math.floor(Math.random() * codeFiles.length)];
+    console.log(`[DEBUG] Selected random file: ${randomFile.path}`);
     return await fetchFileContent(owner, repo, randomFile.path);
   } catch (error) {
-    console.error(`Error getting random code file from ${owner}/${repo}:`, error);
+    console.error(`[ERROR] Error getting random code file from ${owner}/${repo}:`, error);
     throw error;
   }
 }
@@ -820,45 +898,57 @@ async function analyzeCode(code: string, path: string, language: string) {
       messages: [
         {
           role: "system",
-          content: "You are an expert code analyzer. Given a code snippet, provide a concise description of what the code does and rate its complexity on a scale of 1-10, where 1 is very simple and 10 is extremely complex. Consider factors like algorithmic complexity, number of control structures, and overall cognitive load required to understand the code."
+          content: `You are an expert code analyzer. Analyze the provided code and return a JSON response with exactly two fields:
+          1. "description": A concise 1-2 sentence description of what the code does
+          2. "complexity": A numeric rating from 1-10 (integers only) where 1 is very simple and 10 is extremely complex
+          
+          For complexity ratings, consider:
+          - Algorithmic complexity
+          - Control flow complexity
+          - Number of abstractions
+          - Cognitive load required to understand
+          
+          If this is a configuration file, initialization code, or extremely simple boilerplate, explicitly rate it lower than 3.
+          
+          Your response must be valid JSON with only these two fields.`
         },
         {
           role: "user",
-          content: `Analyze this ${language} code from the file ${path}:\n\n${code}\n\nProvide a concise description (1-2 sentences) of what this code does and rate its complexity on a scale of 1-10. If this is a configuration file, initialization code, or extremely simple boilerplate, explicitly rate it lower than 3.`
+          content: `Analyze this ${language} code from the file ${path}:\n\n${code}\n\nProvide a JSON response with a concise description and complexity rating.`
         }
       ],
       temperature: 0.7,
       max_tokens: 300,
-      response_format: { type: "json_object" }, // Request structured response
+      response_format: { type: "json_object" },
     });
 
-    let analysis;
+    // Parse JSON response with error handling
     try {
-      // Parse JSON response
-      analysis = JSON.parse(response.choices[0].message.content || '{}');
-      return {
-        description: analysis.description || "This code implements functionality relevant to the repository.",
-        complexity: analysis.complexity || 5
-      };
-    } catch (err) {
-      // Fallback to text parsing if JSON parsing fails
-      const analysisText = response.choices[0].message.content || '';
+      const analysisText = response.choices[0].message.content || '{}';
+      const analysis = JSON.parse(analysisText);
       
-      // Extract description and complexity from AI response
-      let description = analysisText;
-      let complexity = 5; // Default value
-      
-      const complexityMatch = analysisText.match(/complexity.*?(\d+)/i);
-      if (complexityMatch && complexityMatch[1]) {
-        complexity = parseInt(complexityMatch[1]);
-        // Ensure complexity is within bounds
-        complexity = Math.min(Math.max(complexity, 1), 10);
-        
-        // Remove the complexity part from description
-        description = analysisText.replace(/complexity.*?(\d+)/i, '').trim();
+      // Validate expected fields exist
+      if (!analysis.description || typeof analysis.complexity !== 'number') {
+        console.warn('Incomplete analysis response:', analysisText);
+        return {
+          description: analysis.description || "This code implements functionality relevant to the repository.",
+          complexity: analysis.complexity || 5
+        };
       }
       
-      return { description, complexity };
+      // Ensure complexity is within bounds
+      const complexity = Math.min(Math.max(Math.round(analysis.complexity), 1), 10);
+      
+      return {
+        description: analysis.description,
+        complexity: complexity
+      };
+    } catch (err) {
+      console.error('Error parsing analysis response:', err);
+      return { 
+        description: "This code implements functionality relevant to the repository.",
+        complexity: 5
+      };
     }
   } catch (error) {
     console.error('Error analyzing code with OpenAI:', error);
@@ -953,8 +1043,10 @@ const gameRepoHistory: Record<string, string[]> = {};
 export async function POST(request: Request) {
   try {
     const { gameId, roundNumber } = await request.json();
+    console.log(`[DEBUG] Creating round ${roundNumber} for game ${gameId}`);
     
     // Get game room details to check player IDs
+    console.log(`[DEBUG] Fetching game room details for ${gameId}`);
     const { data: gameRoom, error: gameError } = await supabase
       .from('game_rooms')
       .select('*')
@@ -962,11 +1054,15 @@ export async function POST(request: Request) {
       .single();
     
     if (gameError || !gameRoom) {
+      console.error(`[ERROR] Game room not found: ${gameId}`, gameError);
       return NextResponse.json({ error: 'Game room not found' }, { status: 404 });
     }
     
+    console.log(`[DEBUG] Found game room: ${gameRoom.id}, total rounds: ${gameRoom.total_rounds}`);
+    
     // Initialize repo history for this game if it doesn't exist
     if (!gameRepoHistory[gameId]) {
+      console.log(`[DEBUG] Initializing repo history for game ${gameId}`);
       gameRepoHistory[gameId] = [];
     }
     
@@ -975,8 +1071,11 @@ export async function POST(request: Request) {
       repo => !gameRepoHistory[gameId].includes(`${repo.owner}/${repo.repo}`)
     );
     
+    console.log(`[DEBUG] ${availableRepos.length} repositories available out of ${popularRepos.length} total`);
+    
     // If we've used all repositories or none are available, reset the history
     const repoPool = availableRepos.length > 0 ? availableRepos : popularRepos;
+    console.log(`[DEBUG] Using pool of ${repoPool.length} repositories`);
     
     // Select a random repository from the available pool
     const randomRepoIndex = Math.floor(Math.random() * repoPool.length);
@@ -986,16 +1085,18 @@ export async function POST(request: Request) {
     const repoKey = `${selectedRepo.owner}/${selectedRepo.repo}`;
     if (!gameRepoHistory[gameId].includes(repoKey)) {
       gameRepoHistory[gameId].push(repoKey);
+      console.log(`[DEBUG] Added ${repoKey} to game history. History now has ${gameRepoHistory[gameId].length} repos`);
     }
     
-    console.log(`Round ${roundNumber}: Selected repo ${repoKey}`);
-    console.log(`Game ${gameId} repo history:`, gameRepoHistory[gameId]);
+    console.log(`[DEBUG] Round ${roundNumber}: Selected repo ${repoKey} (${selectedRepo.language})`);
+    console.log(`[DEBUG] Game ${gameId} repo history:`, gameRepoHistory[gameId]);
     
     let codeData;
     let programDescription;
     let complexity;
     
     try {
+      console.log(`[DEBUG] Attempting to get appropriate code from primary repo ${repoKey}`);
       // Try to get appropriate code from GitHub API
       const result = await getAppropriateCodeFile(selectedRepo.owner, selectedRepo.repo, 4);
       
@@ -1006,15 +1107,25 @@ export async function POST(request: Request) {
       };
       programDescription = result.description;
       complexity = result.complexity;
+      
+      console.log(`[DEBUG] Successfully got code from primary repo ${repoKey}:`, {
+        path: result.path,
+        complexity: result.complexity,
+        contentLength: result.content.length
+      });
     } catch (error) {
-      console.error('Error fetching from GitHub API for primary repo, trying alternative repos:', error);
+      console.error(`[ERROR] Error fetching from GitHub API for primary repo ${repoKey}:`, error);
+      console.log(`[DEBUG] Trying alternative repos...`);
       
       // Try with up to 5 different repositories instead of just 3
       const remainingRepos = [...repoPool].filter(repo => 
         `${repo.owner}/${repo.repo}` !== repoKey
       );
       
+      console.log(`[DEBUG] ${remainingRepos.length} alternative repos available`);
+      
       if (remainingRepos.length === 0) {
+        console.error(`[ERROR] No alternative repositories available`);
         return NextResponse.json({ error: 'Failed to fetch code from any repository' }, { status: 500 });
       }
       
@@ -1022,17 +1133,22 @@ export async function POST(request: Request) {
       const maxBackupRepos = Math.min(5, remainingRepos.length);
       let success = false;
       
+      console.log(`[DEBUG] Will try up to ${maxBackupRepos} backup repositories`);
+      
       for (let i = 0; i < maxBackupRepos && !success; i++) {
         // Select a different random repository
         const backupRepoIndex = Math.floor(Math.random() * remainingRepos.length);
         const backupRepo = remainingRepos.splice(backupRepoIndex, 1)[0]; // Remove the repo from the pool
         
-        console.log(`Trying backup repo ${i+1}/${maxBackupRepos}: ${backupRepo.owner}/${backupRepo.repo}`);
+        const backupRepoKey = `${backupRepo.owner}/${backupRepo.repo}`;
+        console.log(`[DEBUG] Trying backup repo ${i+1}/${maxBackupRepos}: ${backupRepoKey} (${backupRepo.language})`);
         
         try {
           // Try to get code from the backup repository with progressively reduced requirements
           // Reduce complexity requirement more aggressively with each attempt
           const minComplexity = Math.max(2, 4 - Math.floor(i * 1.5)); 
+          console.log(`[DEBUG] Using reduced complexity requirement: ${minComplexity} for backup ${i+1}`);
+          
           const backupResult = await getAppropriateCodeFile(backupRepo.owner, backupRepo.repo, minComplexity);
           
           codeData = {
@@ -1043,25 +1159,34 @@ export async function POST(request: Request) {
           programDescription = backupResult.description;
           complexity = backupResult.complexity;
           
+          console.log(`[DEBUG] Successfully got code from backup repo ${backupRepoKey}:`, {
+            path: backupResult.path,
+            complexity: backupResult.complexity,
+            contentLength: backupResult.content.length
+          });
+          
           // Add backup repo to history if successful
-          const backupRepoKey = `${backupRepo.owner}/${backupRepo.repo}`;
           if (!gameRepoHistory[gameId].includes(backupRepoKey)) {
             gameRepoHistory[gameId].push(backupRepoKey);
+            console.log(`[DEBUG] Added ${backupRepoKey} to game history`);
           }
           
           success = true;
         } catch (backupError) {
-          console.error(`Error fetching from backup GitHub repo ${i+1}:`, backupError);
+          console.error(`[ERROR] Error fetching from backup GitHub repo ${i+1} (${backupRepoKey}):`, backupError);
         }
       }
       
       // If still no success, try one last attempt with even more relaxed constraints
       if (!success && remainingRepos.length > 0) {
+        console.log(`[DEBUG] Making one final attempt with minimal constraints...`);
         try {
-          console.log("Making one final attempt with minimal constraints...");
           // Get a random repo from remaining ones
           const lastChanceRepoIndex = Math.floor(Math.random() * remainingRepos.length);
           const lastChanceRepo = remainingRepos[lastChanceRepoIndex];
+          
+          const lastChanceRepoKey = `${lastChanceRepo.owner}/${lastChanceRepo.repo}`;
+          console.log(`[DEBUG] Last chance attempt with repo: ${lastChanceRepoKey}`);
           
           // Try with minimal complexity requirement and reduced line count
           const lastChanceResult = await getLastChanceCodeFile(lastChanceRepo.owner, lastChanceRepo.repo);
@@ -1074,25 +1199,33 @@ export async function POST(request: Request) {
           programDescription = lastChanceResult.description;
           complexity = lastChanceResult.complexity || 3; // Default to moderate complexity
           
+          console.log(`[DEBUG] Successfully got code from last chance repo ${lastChanceRepoKey}:`, {
+            path: lastChanceResult.path,
+            complexity: lastChanceResult.complexity,
+            contentLength: lastChanceResult.content.length
+          });
+          
           // Add to history
-          const lastChanceRepoKey = `${lastChanceRepo.owner}/${lastChanceRepo.repo}`;
           if (!gameRepoHistory[gameId].includes(lastChanceRepoKey)) {
             gameRepoHistory[gameId].push(lastChanceRepoKey);
+            console.log(`[DEBUG] Added ${lastChanceRepoKey} to game history`);
           }
           
           success = true;
         } catch (finalError) {
-          console.error("Final attempt failed:", finalError);
+          console.error(`[ERROR] Final attempt failed:`, finalError);
         }
       }
       
       if (!success) {
+        console.error(`[ERROR] Failed to fetch code from any repository after multiple attempts`);
         return NextResponse.json({ error: 'Failed to fetch code from any repository after multiple attempts' }, { status: 500 });
       }
     }
     
     // Ensure codeData exists before proceeding
     if (!codeData) {
+      console.error(`[ERROR] No valid code data available after all attempts`);
       return NextResponse.json({ error: 'Failed to fetch valid code data' }, { status: 500 });
     }
     
@@ -1102,7 +1235,10 @@ export async function POST(request: Request) {
     const complexityFactor = 10; // seconds per complexity point
     const timeLimit = baseTime + (complexity * complexityFactor);
     
+    console.log(`[DEBUG] Setting time limit to ${timeLimit} seconds based on complexity ${complexity}`);
+    
     // Create a new round
+    console.log(`[DEBUG] Creating new round in database for game ${gameId}, round ${roundNumber}`);
     const { data: round, error: roundError } = await supabase
       .from('rounds')
       .insert({
@@ -1119,63 +1255,78 @@ export async function POST(request: Request) {
       .single();
     
     if (roundError) {
+      console.error(`[ERROR] Failed to create round in database:`, roundError);
       return NextResponse.json({ error: 'Failed to create round' }, { status: 500 });
     }
     
+    console.log(`[DEBUG] Successfully created round ${round.id} for game ${gameId}`);
+    
     // Clean up history for completed games
     if (roundNumber >= gameRoom.total_rounds) {
+      console.log(`[DEBUG] Final round reached, cleaning up repo history for game ${gameId}`);
       delete gameRepoHistory[gameId];
     }
     
     return NextResponse.json({ success: true, round });
     
   } catch (error) {
-    console.error('Error creating round:', error);
+    console.error(`[ERROR] Unhandled error in create-round:`, error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
 
 // Function to get a random code file with appropriate complexity and minimum line count
 async function getAppropriateCodeFile(owner: string, repo: string, minComplexity: number = 4) {
+  console.log(`[DEBUG] Searching for appropriate code file in ${owner}/${repo} with min complexity ${minComplexity}`);
+  
   // Try up to 12 times to find an appropriately complex file with enough code lines
   for (let attempt = 0; attempt < 12; attempt++) {
+    console.log(`[DEBUG] Attempt ${attempt+1}/12 to find appropriate file from ${owner}/${repo}`);
+    
     try {
       // Get a random code file
       const codeData = await getRandomCodeFile(owner, repo);
+      console.log(`[DEBUG] Retrieved file: ${codeData.path}`);
       
       // Get the language from the file path
       const language = getLanguageFromPath(codeData.path);
+      console.log(`[DEBUG] Detected language: ${language}`);
       
       // Remove comments from the code
+      console.log(`[DEBUG] Removing comments from file content`);
       const cleanCode = removeComments(codeData.content, language);
       
       // Count non-comment lines
       const codeLineCount = countCodeLines(cleanCode);
-      
-      console.log(`Selected file ${codeData.path} has ${codeLineCount} lines of code (excluding comments)`);
+      console.log(`[DEBUG] File ${codeData.path} has ${codeLineCount} lines of code (excluding comments)`);
       
       // Progressively reduce line count requirement in later attempts
       const minLines = attempt < 8 ? 100 : (attempt < 10 ? 80 : 60);
+      console.log(`[DEBUG] Current minimum line requirement: ${minLines}`);
       
       // Check if the file has enough lines of code
       if (codeLineCount < minLines) {
-        console.log(`File ${codeData.path} has fewer than ${minLines} lines of code (${codeLineCount}), trying again...`);
+        console.log(`[DEBUG] File ${codeData.path} has fewer than ${minLines} lines of code (${codeLineCount}), trying again...`);
         continue;
       }
       
       // Analyze the complexity
+      console.log(`[DEBUG] Analyzing complexity of ${codeData.path}`);
       const analysis = await analyzeCode(
         cleanCode,
         codeData.path,
         language
       );
       
-      console.log(`Selected file ${codeData.path} has complexity: ${analysis.complexity}`);
+      console.log(`[DEBUG] Analysis result for ${codeData.path}: complexity=${analysis.complexity}, description="${analysis.description.substring(0, 50)}..."`);
       
       // If complexity is sufficient, return it
       // Progressively reduce complexity requirement in later attempts
       const targetComplexity = attempt < 8 ? minComplexity : Math.max(2, minComplexity - 1);
+      console.log(`[DEBUG] Current target complexity: ${targetComplexity}`);
+      
       if (analysis.complexity >= targetComplexity) {
+        console.log(`[DEBUG] File ${codeData.path} meets criteria with complexity ${analysis.complexity} ≥ ${targetComplexity}`);
         return {
           ...codeData,
           content: cleanCode, // Return the code with comments removed
@@ -1183,38 +1334,47 @@ async function getAppropriateCodeFile(owner: string, repo: string, minComplexity
           complexity: analysis.complexity
         };
       } else {
-        console.log(`File ${codeData.path} complexity too low (${analysis.complexity}), trying again...`);
+        console.log(`[DEBUG] File ${codeData.path} complexity too low (${analysis.complexity} < ${targetComplexity}), trying again...`);
       }
     } catch (error) {
-      console.error(`Attempt ${attempt + 1} failed:`, error);
-      if (attempt === 11) throw error; // Re-throw on last attempt
+      console.error(`[ERROR] Attempt ${attempt + 1} failed for ${owner}/${repo}:`, error);
+      if (attempt === 11) {
+        console.error(`[ERROR] All attempts exhausted for ${owner}/${repo}`);
+        throw error; // Re-throw on last attempt
+      }
     }
   }
   
+  console.error(`[ERROR] Could not find appropriate file in ${owner}/${repo} after 12 attempts`);
   throw new Error('Could not find a file with appropriate complexity and minimum line count');
 }
 
 // Fallback function for finding any valid code when all else fails
 async function getLastChanceCodeFile(owner: string, repo: string) {
-  console.log(`Last chance attempt for ${owner}/${repo} with minimal requirements`);
+  console.log(`[DEBUG] Last chance attempt for ${owner}/${repo} with minimal requirements`);
   
   for (let attempt = 0; attempt < 5; attempt++) {
+    console.log(`[DEBUG] Last chance attempt ${attempt+1}/5 for ${owner}/${repo}`);
+    
     try {
       // Get any code file we can find
       const codeData = await getRandomCodeFile(owner, repo);
+      console.log(`[DEBUG] Last chance retrieved file: ${codeData.path}`);
       
       // Get the language from the file path
       const language = getLanguageFromPath(codeData.path);
+      console.log(`[DEBUG] Detected language: ${language}`);
       
       // Remove comments from the code
       const cleanCode = removeComments(codeData.content, language);
       
       // Count non-comment lines
       const codeLineCount = countCodeLines(cleanCode);
+      console.log(`[DEBUG] Last chance file ${codeData.path} has ${codeLineCount} lines of code`);
       
       // Accept any file with at least 50 lines
       if (codeLineCount >= 50) {
-        console.log(`Last chance found file ${codeData.path} with ${codeLineCount} lines`);
+        console.log(`[DEBUG] Last chance found acceptable file ${codeData.path} with ${codeLineCount} lines`);
         
         // Simple description if we can't get an AI analysis
         let description = "This code implements functionality relevant to the repository.";
@@ -1222,11 +1382,13 @@ async function getLastChanceCodeFile(owner: string, repo: string) {
         
         try {
           // Try to get analysis but don't fail if it doesn't work
+          console.log(`[DEBUG] Attempting to analyze last chance file ${codeData.path}`);
           const analysis = await analyzeCode(cleanCode, codeData.path, language);
           description = analysis.description;
           complexity = analysis.complexity;
+          console.log(`[DEBUG] Last chance analysis successful: complexity=${complexity}`);
         } catch (analysisError) {
-          console.error("Failed to analyze code, using default description", analysisError);
+          console.error(`[ERROR] Failed to analyze last chance file, using default description:`, analysisError);
         }
         
         return {
@@ -1235,12 +1397,18 @@ async function getLastChanceCodeFile(owner: string, repo: string) {
           description,
           complexity
         };
+      } else {
+        console.log(`[DEBUG] Last chance file ${codeData.path} too short (${codeLineCount} < 50), trying again`);
       }
     } catch (error) {
-      console.error(`Last chance attempt ${attempt + 1} failed:`, error);
-      if (attempt === 4) throw error;
+      console.error(`[ERROR] Last chance attempt ${attempt + 1} failed for ${owner}/${repo}:`, error);
+      if (attempt === 4) {
+        console.error(`[ERROR] All last chance attempts exhausted for ${owner}/${repo}`);
+        throw error;
+      }
     }
   }
   
+  console.error(`[ERROR] Even last chance attempts failed for ${owner}/${repo}`);
   throw new Error('Even last chance attempts failed to find suitable code');
 }
