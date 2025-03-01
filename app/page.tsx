@@ -117,13 +117,6 @@ export default function Home() {
             <li>The player with the most accurate description wins the round</li>
             <li>Win the majority of rounds to win the game!</li>
           </ol>
-          
-          <h2 className="font-semibold mb-2 mt-4">Testing Tips</h2>
-          <ul className="list-disc list-inside space-y-1 text-sm">
-            <li>For the best experience, use different browsers or devices for each player</li>
-            <li>If testing alone, you can use the same browser - the game will generate unique IDs for each player</li>
-            <li>When joining as the second player, a new user ID is automatically generated</li>
-          </ul>
         </div>
       </div>
     </div>
