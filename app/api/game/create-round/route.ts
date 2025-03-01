@@ -870,42 +870,6 @@ async function analyzeCode(code: string, path: string, language: string) {
   }
 }
 
-// Function to get a random code file with appropriate complexity
-async function getAppropriateCodeFile(owner: string, repo: string, minComplexity: number = 4) {
-  // Try up to 3 times to find an appropriately complex file
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      // Get a random code file
-      const codeData = await getRandomCodeFile(owner, repo);
-      
-      // Analyze the complexity
-      const analysis = await analyzeCode(
-        codeData.content,
-        codeData.path,
-        getLanguageFromPath(codeData.path)
-      );
-      
-      console.log(`Selected file ${codeData.path} has complexity: ${analysis.complexity}`);
-      
-      // If complexity is sufficient, return it
-      if (analysis.complexity >= minComplexity) {
-        return {
-          ...codeData,
-          description: analysis.description,
-          complexity: analysis.complexity
-        };
-      } else {
-        console.log(`File ${codeData.path} complexity too low (${analysis.complexity}), trying again...`);
-      }
-    } catch (error) {
-      console.error(`Attempt ${attempt + 1} failed:`, error);
-      if (attempt === 2) throw error; // Re-throw on last attempt
-    }
-  }
-  
-  throw new Error('Could not find a file with appropriate complexity');
-}
-
 // Helper to determine language from file path
 function getLanguageFromPath(path: string) {
   const extension = path.split('.').pop()?.toLowerCase();
@@ -927,6 +891,50 @@ function getLanguageFromPath(path: string) {
   };
   
   return languageMap[extension || ''] || 'Unknown';
+}
+
+// Function to remove comments from code based on language
+function removeComments(code: string, language: string): string {
+  switch (language.toLowerCase()) {
+    case 'javascript':
+    case 'javascript (react)':
+    case 'typescript':
+    case 'typescript (react)':
+    case 'java':
+    case 'c':
+    case 'c++':
+    case 'c#':
+    case 'go':
+    case 'rust':
+    case 'php':
+      // Remove multi-line comments (/* */)
+      let result = code.replace(/\/\*[\s\S]*?\*\//g, '');
+      // Remove single-line comments (//)
+      result = result.replace(/\/\/.*$/gm, '');
+      return result;
+    
+    case 'python':
+    case 'ruby':
+      // Remove multi-line docstrings (''' ''' or """ """)
+      let pyResult = code.replace(/(['"])['"][^]*?\1\1/g, '');
+      // Remove single-line comments (#)
+      pyResult = pyResult.replace(/#.*$/gm, '');
+      return pyResult;
+    
+    default:
+      // For unknown languages, make a best effort to remove common comment styles
+      let defaultResult = code.replace(/\/\*[\s\S]*?\*\//g, ''); // C-style multi-line
+      defaultResult = defaultResult.replace(/\/\/.*$/gm, '');    // C-style single-line
+      defaultResult = defaultResult.replace(/#.*$/gm, '');       // Shell/Python style
+      return defaultResult;
+  }
+}
+
+// Function to count non-comment, non-empty lines of code
+function countCodeLines(code: string): number {
+  // Split by newlines and filter out empty lines
+  const lines = code.split('\n').filter(line => line.trim().length > 0);
+  return lines.length;
 }
 
 // Keep track of repositories used in each game to avoid repeats
@@ -1066,4 +1074,58 @@ export async function POST(request: Request) {
     console.error('Error creating round:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
+}
+
+// Function to get a random code file with appropriate complexity and minimum line count
+async function getAppropriateCodeFile(owner: string, repo: string, minComplexity: number = 4) {
+  // Try up to 5 times to find an appropriately complex file with enough code lines
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      // Get a random code file
+      const codeData = await getRandomCodeFile(owner, repo);
+      
+      // Get the language from the file path
+      const language = getLanguageFromPath(codeData.path);
+      
+      // Remove comments from the code
+      const cleanCode = removeComments(codeData.content, language);
+      
+      // Count non-comment lines
+      const codeLineCount = countCodeLines(cleanCode);
+      
+      console.log(`Selected file ${codeData.path} has ${codeLineCount} lines of code (excluding comments)`);
+      
+      // Check if the file has enough lines of code (100+)
+      if (codeLineCount < 100) {
+        console.log(`File ${codeData.path} has fewer than 100 lines of code (${codeLineCount}), trying again...`);
+        continue;
+      }
+      
+      // Analyze the complexity
+      const analysis = await analyzeCode(
+        cleanCode,
+        codeData.path,
+        language
+      );
+      
+      console.log(`Selected file ${codeData.path} has complexity: ${analysis.complexity}`);
+      
+      // If complexity is sufficient, return it
+      if (analysis.complexity >= minComplexity) {
+        return {
+          ...codeData,
+          content: cleanCode, // Return the code with comments removed
+          description: analysis.description,
+          complexity: analysis.complexity
+        };
+      } else {
+        console.log(`File ${codeData.path} complexity too low (${analysis.complexity}), trying again...`);
+      }
+    } catch (error) {
+      console.error(`Attempt ${attempt + 1} failed:`, error);
+      if (attempt === 4) throw error; // Re-throw on last attempt
+    }
+  }
+  
+  throw new Error('Could not find a file with appropriate complexity and minimum line count');
 }
